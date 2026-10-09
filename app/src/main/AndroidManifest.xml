@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      Gaze 坚持「本地优先」：不登录、不注册、不上传。
+      这里显式移除依赖可能传递进来的网络权限，让「安装包里没有任何网络权限」
+      成为一个可以用 aapt2 dump badging 直接验证的事实。
+    -->
+    <uses-permission
+        android:name="android.permission.INTERNET"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.ACCESS_NETWORK_STATE"
+        tools:node="remove" />
+
+    <application
+        android:name=".GazeApp"
+        android:allowBackup="false"
+        android:hardwareAccelerated="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:largeHeap="true"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Gaze">
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|density|smallestScreenSize"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Gaze"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+              注册为 .gaze-backup 的「打开方式」。
+
+              ## 为什么声明具体 mimeType 不够（第一版就是栽在这里）
+
+              `.gaze-backup` 是自定义扩展名，**系统 MimeTypeMap 里没有它**。
+              文件管理器反查类型时只会得到三种结果之一：
+                - `null`（认不出，最常见）
+                - `*/*`（很多 ROM 文件管理器的兜底写法）
+                - `application/octet-stream`（DocumentsProvider 的兜底写法）
+
+              而 Intent 的匹配规则是：**只要 intent 带了 type，filter 就必须声明
+              一个能匹配上的 mimeType；反之 intent 没带 type 时，声明了 mimeType
+              的 filter 也匹配不上。** 于是只写具体类型（x-gaze-backup /
+              octet-stream）的 filter 在前两种情况下一个都匹配不上 ——
+              Gaze 就永远不出现在「打开方式」列表里。
+              **这不是备份文件的问题，也不是文件损坏。**
+
+              ## 四组 filter，按 type 的三种形态分别覆盖
+
+              注意 `<data>` 的语义：同一个 `<intent-filter>` 里的多个 `<data>` 是
+              **按属性合并**的（scheme 取并集、mimeType 取并集，两者之间是 AND）。
+              所以「限定 scheme」和「不限定 mimeType」必须拆到不同的 filter 里写，
+              写在同一个里会变成「scheme 匹配 且 mimeType=*/*」，
+              反而覆盖不到 type 为 null 的情况。
+
+                ① intent type = null    → 只能由「声明了 scheme、没声明 mimeType」的 filter 接住
+                ② intent type = */*     → 只能由声明了 `*/*` 的 filter 接住
+                ③ intent type = 具体值  → 由声明该具体值的 filter 接住
+
+              ①②两组都限定在 content / file 两种 scheme 上，
+              **不会**把 http 链接、market:// 之类也抢过来（也刻意不加 BROWSABLE）。
+              代价是 Gaze 会出现在所有本地文件的「打开方式」里 —— 进来之后按**内容**
+              判断（备份包的根目录里有 manifest.json），不是备份就明确提示，不会误导入。
+              这个代价是这套注册方式绕不开的，取舍与 Cradle 当时一致。
+            -->
+            <!-- ① intent 没带 type：只有「纯 scheme」的 filter 能匹配 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+            </intent-filter>
+            <!-- ② intent 带 */* -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" android:mimeType="*/*" />
+                <data android:scheme="file" android:mimeType="*/*" />
+            </intent-filter>
+            <!-- ③ intent 带具体 type -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/x-gaze-backup" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
+
+            <!--
+              「分享到 Gaze」。分享面板同样可能给出 null / */* 的 type，
+              所以也要 `*/*` 兜底。SEND 的 type 不会为 null（框架要求必须有），
+              因此不需要额外一组纯 scheme 的。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/x-gaze-backup" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Gaze：一只注视的眼睛 -->
+    <path
+        android:fillColor="#F5F2EC"
+        android:pathData="M20,54 C33,36 75,36 88,54 C75,72 33,72 20,54 Z" />
+    <path
+        android:fillColor="#121212"
+        android:pathData="M54,54 m-11,0 a11,11 0 1,0 22,0 a11,11 0 1,0 -22,0" />
+    <path
+        android:fillColor="#F5F2EC"
+        android:pathData="M54,50 m-3.4,0 a3.4,3.4 0 1,0 6.8,0 a3.4,3.4 0 1,0 -6.8,0" />
+</vector>

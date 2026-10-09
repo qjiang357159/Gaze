@@ -1,0 +1,25 @@
+*.iml
+.gradle/
+.kotlin/
+local.properties
+.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild
+.cxx
+
+# 签名：密钥与口令都不进版本库
+keystore.properties
+.secrets/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+
+# 构建产物
+*.apk
+*.aab
+*.dex
+*.log
