@@ -22,9 +22,9 @@
 
 ## 屏幕截图
 
-|                   书架                   |                  标签                  |                      设置                      |
-| :--------------------------------------: | :------------------------------------: | :--------------------------------------------: |
-| ![shelf](./assets/screenshots/shelf.jpg) | ![tags](./assets/screenshots/tags.jpg) | ![settings](./assets/screenshots/settings.jpg) |
+|                   书架                   |                  标签                  |                      设置                      |                    阅读                    |
+| :--------------------------------------: | :------------------------------------: | :--------------------------------------------: | :----------------------------------------: |
+| ![shelf](./assets/screenshots/shelf.jpg) | ![tags](./assets/screenshots/tags.jpg) | ![settings](./assets/screenshots/settings.jpg) | ![reader](./assets/screenshots/reader.jpg) |
 
 ## 主要功能
 
