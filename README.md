@@ -20,6 +20,12 @@
 
 ---
 
+## 屏幕截图
+
+|                   书架                   |                  标签                  |                      设置                      |
+| :--------------------------------------: | :------------------------------------: | :--------------------------------------------: |
+| ![shelf](./assets/screenshots/shelf.jpg) | ![tags](./assets/screenshots/tags.jpg) | ![settings](./assets/screenshots/settings.jpg) |
+
 ## 主要功能
 
 ### 文件格式
@@ -171,7 +177,7 @@ Gaze/
 │   ├── image/           图片解码、封面缓存
 │   ├── scan/            增量扫描、封面生成、SAF 权限
 │   └── ui/              Compose 界面（导航 / 组件 / 页面 / 主题）
-├── assets/              README 顶部那张图标
+├── assets/              README 的图标与屏幕截图（icon.png / screenshots/）
 ├── tools/               图标生成脚本（Python，生成后手动放进 assets/ 与 res/）
 └── gradle/              Gradle Wrapper
 ```
