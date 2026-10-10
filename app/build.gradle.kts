@@ -17,8 +17,8 @@ android {
         applicationId = "com.gaze.reader"
         minSdk = 24
         targetSdk = 36
-        versionCode = 9
-        versionName = "1.5.1"
+        versionCode = 12
+        versionName = "1.7.1"
 
         ndk {
             abiFilters += "arm64-v8a"

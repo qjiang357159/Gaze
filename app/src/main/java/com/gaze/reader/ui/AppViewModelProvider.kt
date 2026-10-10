@@ -10,6 +10,7 @@ import com.gaze.reader.ui.screens.DetailViewModel
 import com.gaze.reader.ui.screens.FavoritesViewModel
 import com.gaze.reader.ui.screens.HistoryViewModel
 import com.gaze.reader.ui.screens.LibraryViewModel
+import com.gaze.reader.ui.screens.MissingViewModel
 import com.gaze.reader.ui.screens.ReaderViewModel
 import com.gaze.reader.ui.screens.SettingsViewModel
 import com.gaze.reader.ui.screens.StatsViewModel
@@ -35,6 +36,7 @@ object AppViewModelProvider {
         initializer { DetailViewModel(app().container, createSavedStateHandle()) }
         initializer { TagDetailViewModel(app().container, createSavedStateHandle()) }
         initializer { ReaderViewModel(app().container, createSavedStateHandle()) }
+        initializer { MissingViewModel(app().container) }
     }
 }
 

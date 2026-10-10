@@ -369,6 +369,28 @@ object GazeIcons {
         }
     }
 
+    /**
+     * 帮助：一个问号圆。
+     *
+     * 与 [Info] 是同一套圆环，只把里面的「i」换成「?」——
+     * 两者可能出现在同一屏，圆环一致才像一对。
+     */
+    val Help: ImageVector by lazy {
+        strokeIcon("GazeHelp") {
+            moveTo(12f, 3.4f)
+            arcTo(8.6f, 8.6f, 0f, isMoreThanHalf = true, isPositiveArc = true, x1 = 12f, y1 = 20.6f)
+            arcTo(8.6f, 8.6f, 0f, isMoreThanHalf = true, isPositiveArc = true, x1 = 12f, y1 = 3.4f)
+            close()
+            // 问号的钩：上半圆 + 收向中间
+            moveTo(9.7f, 9.9f)
+            arcTo(2.3f, 2.3f, 0f, isMoreThanHalf = false, isPositiveArc = true, x1 = 14.3f, y1 = 9.9f)
+            lineTo(12f, 13.8f)
+            // 下面的一点
+            moveTo(12f, 17.2f)
+            lineTo(12f, 17.5f)
+        }
+    }
+
     // ------------------------------------------------------------ 内部
 
     private fun PathBuilder.ray(x0: Float, y0: Float, x1: Float, y1: Float) {

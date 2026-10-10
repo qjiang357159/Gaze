@@ -75,11 +75,18 @@ class TagsViewModel(private val container: AppContainer) : ViewModel() {
         }
     }
 
-    fun createTag(name: String) {
+    /**
+     * 新建标签。
+     *
+     * [color] 由界面上的取色器决定 —— 之前这里只收名字、颜色交给仓库自动推荐，
+     * 于是用户在对话框里挑的颜色**根本没被用上**（挑的和建出来的是两个色）。
+     * 颜色是用户明确做出的选择，没有任何理由丢掉它。
+     */
+    fun createTag(name: String, color: Int) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
-            val tag = container.tagRepository.create(trimmed)
+            val tag = container.tagRepository.create(trimmed, color)
             message.value = if (tag != null) "已创建标签「${tag.name}」" else "标签创建失败"
         }
     }
@@ -100,6 +107,12 @@ class TagsViewModel(private val container: AppContainer) : ViewModel() {
 
     fun setColor(id: Long, color: Int) {
         viewModelScope.launch { container.tagRepository.setColor(id, color) }
+    }
+
+    /** 长按拖动排序：把整个新顺序一次性写下去。 */
+    fun reorder(orderedIds: List<Long>) {
+        if (orderedIds.isEmpty()) return
+        viewModelScope.launch { container.tagRepository.reorder(orderedIds) }
     }
 
     fun deleteTag(id: Long, name: String) {

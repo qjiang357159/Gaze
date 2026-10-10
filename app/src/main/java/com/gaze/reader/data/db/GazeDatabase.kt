@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         ReadingSessionEntity::class,
         ShelfCoverEntity::class
     ],
-    version = 3,
+    version = 5,
     exportSchema = false
 )
 abstract class GazeDatabase : RoomDatabase() {
@@ -94,13 +94,39 @@ abstract class GazeDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v3 -> v4。
+         *
+         * 只给 `tags` 加一列 `sortOrder`（标签长按拖动排序）。
+         * 同样**可空、无默认值**：老标签保持 NULL，界面上按创建时间排，
+         * 等用户第一次拖动时才真正写入位次。
+         */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `tags` ADD COLUMN `sortOrder` INTEGER")
+            }
+        }
+
+        /**
+         * v4 -> v5。
+         *
+         * 只给 `folders` 加一列 `pending`：恢复备份带回来的文件夹不再冒充「已授权」，
+         * 而是先记成「待重新授权」。可空、无默认值 —— 老数据全是 NULL，
+         * 语义正好是「真正授权过」，不会被误判。
+         */
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `folders` ADD COLUMN `pending` INTEGER")
+            }
+        }
+
         fun get(context: Context): GazeDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also { instance = it }
         }
 
         private fun build(context: Context): GazeDatabase =
             Room.databaseBuilder(context, GazeDatabase::class.java, "gaze.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 // 不用 destructive fallback：宁可启动报错，也不能悄悄清掉用户的阅读进度与标签。
                 .build()
     }

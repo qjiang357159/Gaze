@@ -35,16 +35,25 @@ interface ComicDao {
     suspend fun findByFingerprint(fingerprint: String): List<ComicEntity>
 
     /**
-     * 按内容特征找「改了名的同一个文件」。
+     * 按内容特征找「最该被接回来的那条记录」。
      *
-     * 老数据没有 sampleHash（为 NULL），所以退化成「大小 + 页数」，
-     * 并靠 `LIMIT 2` + 调用方 `singleOrNull()` 保证只在唯一命中时才认。
+     * `ORDER BY missing DESC` 是关键：**已失效的记录优先**。同一个文件既有一条
+     * `missing = 1` 的占位记录、又有一条在库记录，正是「先恢复备份、后授权扫描」
+     * 留下的重复 —— 阅读进度、收藏、标签全在占位那条上。
+     *
+     * 旧写法是 `LIMIT 2` + 调用方 `singleOrNull()`：一旦两条同时存在就直接
+     * 放弃匹配，于是扫描器又新建一条，重复越滚越多，用户看到的就是「标签没了」。
+     *
+     * 老数据没有 sampleHash（为 NULL），退化成 [findLegacyCandidate]。
      */
-    @Query("SELECT * FROM comics WHERE sampleHash = :sampleHash LIMIT 2")
-    suspend fun findBySampleHash(sampleHash: String): List<ComicEntity>
+    @Query("SELECT * FROM comics WHERE sampleHash = :sampleHash ORDER BY missing DESC, id ASC LIMIT 1")
+    suspend fun findSampleHashCandidate(sampleHash: String): ComicEntity?
 
-    @Query("SELECT * FROM comics WHERE sampleHash IS NULL AND size = :size AND pageCount = :pageCount LIMIT 2")
-    suspend fun findLegacyBySizeAndPages(size: Long, pageCount: Int): List<ComicEntity>
+    @Query(
+        "SELECT * FROM comics WHERE sampleHash IS NULL AND size = :size AND pageCount = :pageCount " +
+            "ORDER BY missing DESC, id ASC LIMIT 1"
+    )
+    suspend fun findLegacyCandidate(size: Long, pageCount: Int): ComicEntity?
 
     @Query("SELECT * FROM comics WHERE missing = 1")
     fun observeMissing(): Flow<List<ComicEntity>>
@@ -187,12 +196,19 @@ interface ComicDao {
     @Query("UPDATE comics SET fingerprint = :fingerprint, sampleHash = :hash WHERE id = :id")
     suspend fun setFingerprint(id: Long, fingerprint: String, hash: String)
 
-    /** 备份恢复后重新绑定到本地文件。 */
+    /**
+     * 把一条记录重新绑定到本地文件。
+     *
+     * 顺带刷新 `format` 与 `pageCount`：恢复备份留下的占位记录可能记着
+     * 「ZIP、0 页」（老备份里没有格式字段，页数也可能是 0），只改 uri 的话
+     * PDF / EPUB 会按 ZIP 打开、进度条也会算错。
+     */
     @Query(
         """
         UPDATE comics SET
             uri = :uri, folderUri = :folderUri, missing = 0,
-            size = :size, modifiedTime = :modifiedTime, fileName = :fileName
+            size = :size, modifiedTime = :modifiedTime, fileName = :fileName,
+            format = :format, pageCount = :pageCount
         WHERE id = :id
         """
     )
@@ -202,7 +218,9 @@ interface ComicDao {
         folderUri: String?,
         size: Long,
         modifiedTime: Long,
-        fileName: String
+        fileName: String,
+        format: String,
+        pageCount: Int
     )
 
     // ------------------------------------------------------------ 统计

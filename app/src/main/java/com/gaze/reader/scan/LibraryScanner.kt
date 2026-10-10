@@ -1,5 +1,6 @@
 package com.gaze.reader.scan
 
+import android.content.ContentResolver
 import android.content.Context
 import android.net.Uri
 import android.provider.DocumentsContract
@@ -28,6 +29,8 @@ data class ScanProgress(
     val added: Int = 0,
     val updated: Int = 0,
     val removed: Int = 0,
+    /** 本次扫描顺手合并掉的「重复记录」条数（失效记录并回在库记录）。 */
+    val merged: Int = 0,
     val currentName: String = ""
 )
 
@@ -76,7 +79,9 @@ class LibraryScanner(
     private val resolver get() = context.contentResolver
 
     fun scanAll(): Flow<ScanProgress> = flow {
-        val folderList = folders.getAll()
+        // 只扫真正拿到过权限的文件夹。待重新授权的那些在本机读不出任何东西，
+        // 喂进来只会得到「扫到 0 本」，然后把它们名下的记录全标成失效。
+        val folderList = folders.getAuthorized()
         if (folderList.isEmpty()) {
             emit(ScanProgress(phase = ScanPhase.DONE))
             return@flow
@@ -129,8 +134,24 @@ class LibraryScanner(
             )
         }
 
+        // ---------------------------------------------------- 阶段二点五：合并重复
+        //
+        // 「先恢复备份、后授权扫描」在旧版本下会给同一个文件留下两条记录：
+        // 一条带着标签与阅读进度的失效记录（备份恢复出来的），一条扫描新建的
+        // 在库记录。这里把它们并回去，历史数据才不会一直挂在看不见的空壳上。
+        val merged = mergeMissingTwins()
+
         // ---------------------------------------------------- 阶段三：标记失效
-        emit(ScanProgress(phase = ScanPhase.MARKING, processed = total, total = total, added = added, updated = updated))
+        emit(
+            ScanProgress(
+                phase = ScanPhase.MARKING,
+                processed = total,
+                total = total,
+                added = added,
+                updated = updated,
+                merged = merged
+            )
+        )
         val authorized = folderList.mapTo(HashSet()) { it.uri }
         var removed = 0
         for (comic in comics.getAllPresent()) {
@@ -155,7 +176,8 @@ class LibraryScanner(
                 total = total,
                 added = added,
                 updated = updated,
-                removed = removed
+                removed = removed,
+                merged = merged
             )
         )
     }.flowOn(Dispatchers.IO)
@@ -197,54 +219,113 @@ class LibraryScanner(
     }
 
     /**
-     * 改名 / 换目录识别。
+     * 改名 / 换目录 / 接回占位记录。
      *
      * 顺序：内容特征（sampleHash）-> 老数据的「大小 + 页数」退化匹配。
-     * 命中后必须再确认**候选记录原本的 uri 已经打不开**，
-     * 否则会误伤「同一个文件用户确实存了两份」的正常情况。
+     * 命中后必须确认候选记录**确实缺一个文件**，否则会误伤
+     * 「同一个文件用户确实存了两份」的正常情况 —— 两种「缺文件」：
+     *
+     * - 记录已经标成 `missing = true`（恢复备份留下的占位记录就是这种），
+     *   它本来就是等着被接回来的，直接认；
+     * - 记录还没标记失效，那要确认它原来指向的 uri 已经打不开（见 [isStale]）。
      */
     private suspend fun tryRelink(file: DiscoveredFile, rules: ParseRules): Boolean {
         val hash = MediaFingerprint.sampleHash(resolver, file.uri, file.size) ?: return false
-        val candidate = comics.findBySampleHash(hash)
-            ?: comics.findLegacyBySizeAndPages(file.size, readPageCount(file.uri, file.name).coerceAtLeast(0))
+        val realPages = readPageCount(file.uri, file.name)
+        val candidate = comics.findSampleHashCandidate(hash)
+            ?: comics.findLegacyCandidate(file.size, realPages.coerceAtLeast(0))
             ?: return false
 
-        if (!isStale(candidate.uri)) return false
+        if (!candidate.missing && !isStale(candidate.uri)) return false
 
         val parsed = FileNameParser.parse(file.name, rules)
         val format = ArchiveFormat.of(file.name)
+        // 页数按真实文件重算：老备份里页数可能是 0，不补的话进度条会一直算错
+        val pages = if (realPages > 0) realPages else candidate.pageCount
+
+        // 一次写全 uri / 格式 / 页数。
+        //
+        // **绝不能在这之后拿 relocate 之前的快照去 upsert** —— 那个快照里的 uri
+        // 还是 `gaze://missing/…`、missing 还是 true，写回去等于把刚接好的记录
+        // 又打回「找不到文件」，而且每次扫描都重演一遍，永远接不回来。
         comics.relocate(
             id = candidate.id,
             uri = file.uri.toString(),
             folderUri = file.folderUri,
             size = file.size,
             modifiedTime = file.modified,
-            fileName = file.name
+            fileName = file.name,
+            format = format.label,
+            pageCount = pages
         )
         // 用户改名往往就是为了改作者名，所以标题 / 作者要一起刷新
         applyParsedNames(candidate.id, parsed, rules)
         comics.setFingerprint(
             candidate.id,
-            MediaFingerprint.fingerprint(file.name, file.size, candidate.pageCount, hash),
+            MediaFingerprint.fingerprint(file.name, file.size, pages, hash),
             hash
         )
-        // 格式可能也变了（.zip 改名成 .cbz）
-        if (candidate.format != format.label) {
-            comics.upsert(candidate.copy(format = format.label))
-        }
         return true
     }
 
-    /** 候选记录原来指向的 uri 是否已经打不开。查询抛异常一律按「不存在」处理。 */
+    /**
+     * 候选记录原来指向的 uri 是否已经打不开。
+     *
+     * 三个分支都算「打不开」：
+     *
+     * - **非 content 协议**（恢复备份留下的 `gaze://missing/…` 占位符）——
+     *   这里必须显式判掉。`ContentResolver.query` 对认不出的 scheme 是**返回 null
+     *   而不是抛异常**，旧实现只把异常当失效，于是占位记录永远被当成「文件还在」，
+     *   扫描时既不接它、又新建一条重复记录，标签就留在了那条永远不显示的空壳上；
+     * - 查询返回 null 或空游标（文件已删 / 授权已失效）；
+     * - 查询抛异常（失效 uri 走的正是这个分支，不能 getOrDefault(false)）。
+     */
     private fun isStale(uriString: String): Boolean {
         val uri = runCatching { Uri.parse(uriString) }.getOrNull() ?: return true
+        if (uri.scheme != ContentResolver.SCHEME_CONTENT) return true
         return try {
             resolver.query(uri, arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID), null, null, null)
-                ?.use { it.moveToFirst() } ?: false
+                ?.use { it.moveToFirst() } != true
         } catch (t: Throwable) {
-            // 失效 uri 走的正是异常分支。写成 getOrDefault(true) 会让整个识别静默失效。
             true
         }
+    }
+
+    /**
+     * 合并「同一个文件的失效记录与在库记录」。
+     *
+     * 「先恢复备份、后授权扫描」这个顺序下，旧版扫描器认不出占位记录
+     * （原因见 [isStale]），会给同一个文件再建一条新记录 —— 阅读进度、收藏和
+     * 标签全留在那条 `missing = 1` 的空壳上，用户看到的就是「标签没恢复」。
+     * 这里把空壳上的历史数据并进在库记录，再删掉空壳。
+     *
+     * 代价是「失效记录条数」次查询：库正常时 `getMissing()` 返回空列表，直接返回。
+     */
+    private suspend fun mergeMissingTwins(): Int {
+        val missing = comics.getMissing()
+        if (missing.isEmpty()) return 0
+        val present = comics.getAllPresent()
+        if (present.isEmpty()) return 0
+
+        val byHash = HashMap<String, MutableList<ComicEntity>>()
+        val byNameSize = HashMap<String, MutableList<ComicEntity>>()
+        present.forEach { comic ->
+            comic.sampleHash?.let { byHash.getOrPut(it) { mutableListOf() }.add(comic) }
+            byNameSize.getOrPut("${comic.fileName}|${comic.size}") { mutableListOf() }.add(comic)
+        }
+
+        var merged = 0
+        for (shell in missing) {
+            currentCoroutineContext().ensureActive()
+            // 唯一命中才合并：两条在库记录都指向同一份内容时，并到哪条都不对，
+            // 那种情况该让用户自己去「媒体匹配」里指。
+            val target = shell.sampleHash?.let { byHash[it] }?.singleOrNull()
+                ?: byNameSize["${shell.fileName}|${shell.size}"]?.singleOrNull()
+                ?: continue
+            comics.absorbMissing(target.id, shell.id)
+            merged++
+        }
+        return merged
     }
 
     private suspend fun insertNew(file: DiscoveredFile, rules: ParseRules): Boolean {

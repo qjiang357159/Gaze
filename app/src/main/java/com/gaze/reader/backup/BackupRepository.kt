@@ -15,8 +15,10 @@ import com.gaze.reader.core.ScreenOrientation
 import com.gaze.reader.core.ThemeMode
 import com.gaze.reader.core.ThemeVariant
 import com.gaze.reader.data.db.ComicEntity
+import com.gaze.reader.data.db.ReadingSessionEntity
 import com.gaze.reader.data.repository.ComicRepository
 import com.gaze.reader.data.repository.FolderRepository
+import com.gaze.reader.data.repository.StatsRepository
 import com.gaze.reader.data.repository.TagRepository
 import com.gaze.reader.data.prefs.SettingsRepository
 import com.gaze.reader.domain.UriDisplay
@@ -52,6 +54,7 @@ class BackupRepository(
     private val comics: ComicRepository,
     private val tags: TagRepository,
     private val folders: FolderRepository,
+    private val stats: StatsRepository,
     private val settings: SettingsRepository
 ) {
 
@@ -91,13 +94,21 @@ class BackupRepository(
         val comicList = comics.getAll()
         val tagList = tags.getAll()
         val relations = tags.allRelations()
-        val folderList = folders.getAll()
+        // 只导出真正拿到过权限的文件夹。待重新授权的那些本来就没授权，
+        // 把它们写进备份等于把一个「没生效的授权」再传播给下一台设备。
+        val folderList = folders.getAuthorized()
+        val shelfCovers = comics.getShelfCovers()
+        val sessions = stats.getAll()
 
         val tagNameById = tagList.associate { it.id to it.name }
         val tagsByComic = relations.groupBy(
             keySelector = { it.comicId },
             valueTransform = { tagNameById[it.tagId].orEmpty() }
         ).mapValues { (_, names) -> names.filter { it.isNotBlank() } }
+
+        // 漫画 id -> 跨设备引用。阅读会话与自定义封面都靠它回指漫画 ——
+        // 存 id 的话换台设备就全指到别人身上去了。
+        val refByComicId = comicList.associate { it.id to comicRefOf(it.fingerprint, it.fileName, it.size) }
 
         val database = JSONObject().apply {
             put(
@@ -126,7 +137,13 @@ class BackupRepository(
                                 volume = comic.volume,
                                 note = comic.note,
                                 rating = comic.rating,
-                                tagNames = tagsByComic[comic.id].orEmpty()
+                                tagNames = tagsByComic[comic.id].orEmpty(),
+                                // v2 补全的字段
+                                folderUri = comic.folderUri,
+                                format = comic.format,
+                                modifiedTime = comic.modifiedTime,
+                                manualTitle = comic.manualTitle,
+                                manualAuthor = comic.manualAuthor
                             ).toJson()
                         )
                     }
@@ -134,11 +151,52 @@ class BackupRepository(
             )
             put(
                 "tags",
-                JSONArray().apply { tagList.forEach { put(BackupTag(it.name, it.color, it.createdAt).toJson()) } }
+                JSONArray().apply {
+                    tagList.forEach { put(BackupTag(it.name, it.color, it.createdAt, it.sortOrder).toJson()) }
+                }
             )
             put(
                 "folders",
                 JSONArray().apply { folderList.forEach { put(BackupFolder(it.uri, it.displayName).toJson()) } }
+            )
+            put(
+                "shelfCovers",
+                JSONArray().apply {
+                    shelfCovers.forEach { cover ->
+                        val ref = refByComicId[cover.comicId] ?: return@forEach
+                        put(
+                            BackupShelfCover(
+                                key = cover.key,
+                                // TAG:<id> 里的 id 换设备就废了，额外记一份标签名好重建
+                                tagName = cover.key
+                                    .takeIf { it.startsWith(ComicRepository.TAG_PREFIX) }
+                                    ?.removePrefix(ComicRepository.TAG_PREFIX)
+                                    ?.toLongOrNull()
+                                    ?.let { tagNameById[it] },
+                                comicRef = ref
+                            ).toJson()
+                        )
+                    }
+                }
+            )
+            put(
+                "sessions",
+                JSONArray().apply {
+                    sessions.forEach { session ->
+                        val ref = refByComicId[session.comicId] ?: return@forEach
+                        put(
+                            BackupSession(
+                                comicRef = ref,
+                                startedAt = session.startedAt,
+                                endedAt = session.endedAt,
+                                durationMs = session.durationMs,
+                                startPage = session.startPage,
+                                endPage = session.endPage,
+                                pagesRead = session.pagesRead
+                            ).toJson()
+                        )
+                    }
+                }
             )
         }
 
@@ -173,6 +231,11 @@ class BackupRepository(
             put("createdAt", System.currentTimeMillis())
             put("comicCount", comicList.size)
             put("tagCount", tagList.size)
+            // 下面三个是诊断用的：恢复完发现「标签没进来」时，
+            // 第一件事就是打开备份看看它到底有没有被写进去。
+            put("relationCount", relations.size)
+            put("sessionCount", sessions.size)
+            put("shelfCoverCount", shelfCovers.size)
             put("containsOriginalFiles", false)
         }
 
@@ -237,6 +300,7 @@ class BackupRepository(
                     createdAt = json.optLong("createdAt"),
                     comicCount = json.optInt("comicCount"),
                     tagCount = json.optInt("tagCount"),
+                    relationCount = json.optInt("relationCount"),
                     valid = true
                 )
             }
@@ -266,25 +330,44 @@ class BackupRepository(
                 val backupComics = database.optJSONArray("comics").toBackupComics()
                 val backupTags = database.optJSONArray("tags").toBackupTags()
                 val backupFolders = database.optJSONArray("folders").toBackupFolders()
+                val backupCovers = database.optJSONArray("shelfCovers").toBackupShelfCovers()
+                val backupSessions = database.optJSONArray("sessions").toBackupSessions()
                 entries[BackupFormat.ENTRY_SETTINGS]?.let { applySettings(JSONObject(String(it, Charsets.UTF_8))) }
 
                 if (mode == RestoreMode.OVERWRITE) {
                     comics.clearAll()
                 }
 
-                // 标签先落地，恢复漫画时才能挂上关系
+                // ---------------------------------------------------------- 标签
+                //
+                // 先把标签全部落地，后面挂关系才有 id 可用。
+                // 起点是**当前库里已有的标签**而不是空表：合并恢复时本地本来就有标签，
+                // 只认备份里的那批会让「本地有、备份没有」的标签在挂关系时被当成不存在。
+                val tagIdByName = HashMap<String, Long>()
+                tags.getAll().forEach { tag -> tagIdByName[tag.name] = tag.id }
                 for (tag in backupTags) {
-                    tags.create(tag.name, tag.color)
-                }
-                for (folder in backupFolders) {
-                    folders.add(folder.uri, folder.displayName)
+                    val id = tags.restore(tag.name, tag.color, tag.createdAt, tag.sortOrder)
+                    if (id > 0L) tagIdByName[tag.name] = id
                 }
 
+                // ---------------------------------------------------------- 文件夹
+                //
+                // **只登记成「待重新授权」，绝不冒充已授权。** 备份文件里存不下 SAF 读权限，
+                // 旧实现直接调 folders.add(...) 写库，界面上就出现一个「已授权」的文件夹，
+                // 但每次扫描都读不到任何东西，用户完全不知道为什么。
+                for (folder in backupFolders) {
+                    folders.addPending(folder.uri, folder.displayName)
+                }
+                val pendingFolders = folders.getAll().count { it.pending == true }
+
+                // ---------------------------------------------------------- 漫画
                 val local = comics.getAll()
                 val byFingerprint = HashMap<String, ComicEntity>()
                 val bySampleHash = HashMap<String, ComicEntity>()
                 val byFileNameSize = HashMap<String, ComicEntity>()
-                local.forEach { comic ->
+                // 非失效的优先：同一份文件既有「已失效」的旧记录、又有新扫进来的记录时，
+                // 必须命中后者，否则恢复出来的条目会一直挂着「已失效」。
+                local.sortedBy { if (it.missing) 1 else 0 }.forEach { comic ->
                     comic.fingerprint?.let { byFingerprint.putIfAbsent(it, comic) }
                     comic.sampleHash?.let { bySampleHash.putIfAbsent(it, comic) }
                     byFileNameSize.putIfAbsent("${comic.fileName}|${comic.size}", comic)
@@ -293,13 +376,15 @@ class BackupRepository(
                 var restored = 0
                 var matched = 0
                 var pending = 0
-                val tagIdByName = tags.getAll().associate { it.name to it.id }
+                var relationsWritten = 0
+                val refToNewId = HashMap<String, Long>()
 
-                for (record in backupComics) {
+                for ((index, record) in backupComics.withIndex()) {
                     val hit = record.fingerprint?.let { byFingerprint[it] }
                         ?: record.sampleHash?.let { bySampleHash[it] }
                         ?: byFileNameSize["${record.fileName}|${record.size}"]
 
+                    val targetId: Long
                     if (hit != null) {
                         matched++
                         comics.upsert(
@@ -317,24 +402,36 @@ class BackupRepository(
                                 volume = record.volume ?: hit.volume,
                                 note = record.note ?: hit.note,
                                 rating = record.rating ?: hit.rating,
-                                // 备份里的书名只在本地没有手动改名时才采用
+                                // 文件夹归属：本地扫描出来的更准，本地没有才用备份的
+                                folderUri = hit.folderUri ?: record.folderUri,
+                                // 标题 / 作者谁说了算：本机手改 > 备份里手改 > 备份里的值
                                 title = if (hit.manualTitle) hit.title else record.title,
-                                author = if (hit.manualAuthor) hit.author else record.author
+                                author = if (hit.manualAuthor) hit.author else record.author,
+                                // 但「手改过」这个事实要合并，不能因为换台设备就丢掉
+                                manualTitle = hit.manualTitle || record.manualTitle,
+                                manualAuthor = hit.manualAuthor || record.manualAuthor
                             )
                         )
-                        applyTags(hit.id, record.tagNames, tagIdByName)
+                        targetId = hit.id
                     } else {
                         // 匹配不上：新建一条「待重新定位」记录，**不删任何历史数据**
                         pending++
-                        val placeholder = "gaze://missing/${record.fingerprint ?: record.fileName.hashCode()}"
-                        val newId = comics.upsert(
+                        // 占位 uri 只用来占住「这条记录没有文件」这个位置，不参与匹配。
+                        // 但它必须**唯一** —— uri 上有唯一索引，两条撞上会触发 REPLACE，
+                        // 后一条会把前一条连同它的标签与阅读进度一起删掉。
+                        // 所以带上循环下标：老写法只用 `fileName.hashCode()`，
+                        // 同名的两份文件（不同目录）会互相顶掉。
+                        val placeholder = "gaze://missing/$index-${record.fileName.hashCode()}-${record.size}"
+                        targetId = comics.upsert(
                             ComicEntity(
                                 uri = placeholder,
                                 fileName = record.fileName,
                                 title = record.title,
                                 author = record.author,
-                                format = "ZIP",
+                                // 备份里记了格式就用它 —— 一律写成 ZIP 会让 PDF / EPUB 打不开
+                                format = record.format ?: "ZIP",
                                 size = record.size,
+                                modifiedTime = record.modifiedTime,
                                 pageCount = record.pageCount,
                                 favorite = record.favorite,
                                 addedTime = record.addedTime,
@@ -351,13 +448,58 @@ class BackupRepository(
                                 rating = record.rating,
                                 fingerprint = record.fingerprint,
                                 sampleHash = record.sampleHash,
+                                folderUri = record.folderUri,
+                                manualTitle = record.manualTitle,
+                                manualAuthor = record.manualAuthor,
                                 missing = true
                             )
                         )
-                        if (newId > 0L) applyTags(newId, record.tagNames, tagIdByName)
+                    }
+
+                    if (targetId > 0L) {
+                        refToNewId[record.ref] = targetId
+                        relationsWritten += applyTags(targetId, record.tagNames, tagIdByName)
                     }
                     restored++
                 }
+
+                // ---------------------------------------------------------- 自定义封面
+                //
+                // 覆盖恢复时 clearAll 已经把旧记录清了；合并恢复时逐条覆盖同 key 的记录。
+                for (cover in backupCovers) {
+                    val comicId = refToNewId[cover.comicRef] ?: continue
+                    val key = when {
+                        // TAG:<旧 id> 换设备就废了，按标签名解析成本地的新 id
+                        cover.key.startsWith(ComicRepository.TAG_PREFIX) -> {
+                            val name = cover.tagName ?: continue
+                            val newTagId = tagIdByName[name] ?: continue
+                            ComicRepository.TAG_PREFIX + newTagId
+                        }
+                        else -> cover.key
+                    }
+                    comics.setShelfCover(key, comicId)
+                }
+
+                // ---------------------------------------------------------- 阅读会话
+                //
+                // 按 startedAt 去重：合并恢复反复跑同一份备份时，不该把同一段阅读
+                // 记成好几次。覆盖恢复时本地是空的，这条判据自然全放行。
+                val existingStarts = stats.getAll().mapTo(HashSet()) { it.startedAt }
+                val sessionRows = ArrayList<ReadingSessionEntity>()
+                for (session in backupSessions) {
+                    if (session.startedAt in existingStarts) continue
+                    val comicId = refToNewId[session.comicRef] ?: continue
+                    sessionRows += ReadingSessionEntity(
+                        comicId = comicId,
+                        startedAt = session.startedAt,
+                        endedAt = session.endedAt,
+                        durationMs = session.durationMs,
+                        startPage = session.startPage,
+                        endPage = session.endPage,
+                        pagesRead = session.pagesRead
+                    )
+                }
+                val sessionsWritten = stats.restoreAll(sessionRows)
 
                 BackupResult(
                     success = true,
@@ -365,10 +507,20 @@ class BackupRepository(
                         append("已恢复 $restored 本")
                         if (matched > 0) append("，其中 $matched 本直接匹配到本地文件")
                         if (pending > 0) append("，$pending 本待重新定位")
+                        if (backupTags.isNotEmpty() || relationsWritten > 0) {
+                            append("。标签 ${backupTags.size} 个，挂回关系 $relationsWritten 条")
+                        }
+                        if (sessionsWritten > 0) append("，阅读记录 $sessionsWritten 条")
+                        if (pendingFolders > 0) {
+                            append("。$pendingFolders 个文件夹需要你重新授权后才能扫描")
+                        }
                     },
                     restored = restored,
                     matched = matched,
-                    pending = pending
+                    pending = pending,
+                    tags = backupTags.size,
+                    relations = relationsWritten,
+                    pendingFolders = pendingFolders
                 )
             }
         } catch (t: Throwable) {
@@ -376,11 +528,13 @@ class BackupRepository(
         }
     }
 
-    private suspend fun applyTags(comicId: Long, names: List<String>, idByName: Map<String, Long>) {
+    private suspend fun applyTags(comicId: Long, names: List<String>, idByName: Map<String, Long>): Int {
+        if (names.isEmpty()) return 0
         val ids = names.mapNotNull { idByName[it] }
-        if (ids.isEmpty()) return
-        // 用差集语义：只补上缺的，不动用户本地已有的其它标签
-        tags.addTo(listOf(comicId), ids)
+        if (ids.isEmpty()) return 0
+        // 直接 `INSERT OR IGNORE`：已存在的关系自动跳过，本来就是幂等的差集语义，
+        // 但省掉了 addTo 里「先查一遍已存在关系」的那次 IO —— 几千本逐本查库很慢。
+        return tags.attachAll(comicId, ids)
     }
 
     /**
@@ -477,6 +631,16 @@ class BackupRepository(
     private fun JSONArray?.toBackupFolders(): List<BackupFolder> {
         if (this == null) return emptyList()
         return (0 until length()).map { BackupFolder.fromJson(optJSONObject(it) ?: JSONObject()) }
+    }
+
+    private fun JSONArray?.toBackupShelfCovers(): List<BackupShelfCover> {
+        if (this == null) return emptyList()
+        return (0 until length()).map { BackupShelfCover.fromJson(optJSONObject(it) ?: JSONObject()) }
+    }
+
+    private fun JSONArray?.toBackupSessions(): List<BackupSession> {
+        if (this == null) return emptyList()
+        return (0 until length()).map { BackupSession.fromJson(optJSONObject(it) ?: JSONObject()) }
     }
 
     // ================================================================ 备份文件夹
@@ -603,7 +767,9 @@ class BackupRepository(
                 val byFingerprint = HashMap<String, ComicEntity>()
                 val bySampleHash = HashMap<String, ComicEntity>()
                 val byFileNameSize = HashMap<String, ComicEntity>()
-                local.forEach { comic ->
+                // 与 restore 同一口径：非失效的优先。两边不一致的话，
+                // 就会出现「这里说在、恢复时却说不在」。
+                local.sortedBy { if (it.missing) 1 else 0 }.forEach { comic ->
                     comic.fingerprint?.let { byFingerprint.putIfAbsent(it, comic) }
                     comic.sampleHash?.let { bySampleHash.putIfAbsent(it, comic) }
                     byFileNameSize.putIfAbsent("${comic.fileName}|${comic.size}", comic)

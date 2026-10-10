@@ -12,6 +12,7 @@ import com.gaze.reader.image.CoverStore
 import com.gaze.reader.scan.CoverGenerator
 import com.gaze.reader.scan.LibraryHealthChecker
 import com.gaze.reader.scan.LibraryScanner
+import com.gaze.reader.scan.MediaRelocator
 
 /**
  * 极简依赖容器。
@@ -76,7 +77,13 @@ class AppContainer(context: Context) {
             comics = comicRepository,
             tags = tagRepository,
             folders = folderRepository,
+            stats = statsRepository,
             settings = settingsRepository
         )
+    }
+
+    /** 媒体匹配：把「待重新定位」的记录重新绑回本机文件。 */
+    val mediaRelocator: MediaRelocator by lazy {
+        MediaRelocator(appContext, comicRepository, coverGenerator)
     }
 }

@@ -62,8 +62,21 @@ interface StatsDao {
     @Query("SELECT COUNT(*) FROM reading_sessions")
     suspend fun count(): Int
 
+    /** 全量会话 —— 导出备份时一次性取完。 */
+    @Query("SELECT * FROM reading_sessions")
+    suspend fun getAll(): List<ReadingSessionEntity>
+
     @Query("DELETE FROM reading_sessions WHERE comicId = :comicId")
     suspend fun deleteByComic(comicId: Long)
+
+    /**
+     * 把一段会话改挂到另一本漫画上。
+     *
+     * 用在「合并重复记录」：恢复备份留下的占位记录被并进在库记录时，
+     * 会话不能跟着占位记录一起被删，否则阅读统计会凭空少一截。
+     */
+    @Query("UPDATE reading_sessions SET comicId = :toComicId WHERE comicId = :fromComicId")
+    suspend fun reassignComic(fromComicId: Long, toComicId: Long)
 
     @Query("DELETE FROM reading_sessions WHERE comicId IN (:comicIds)")
     suspend fun deleteByComics(comicIds: List<Long>)

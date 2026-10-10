@@ -22,19 +22,26 @@ interface TagDao {
                   INNER JOIN comics c ON c.id = ct.comicId
                   WHERE ct.tagId = t.id AND c.missing = 0) AS comicCount
         FROM tags t
-        ORDER BY comicCount DESC, t.createdAt ASC
+        ORDER BY (t.sortOrder IS NULL) ASC, t.sortOrder ASC, comicCount DESC, t.createdAt ASC
         """
     )
     fun observeAllWithCount(): Flow<List<TagWithCount>>
 
-    @Query("SELECT * FROM tags ORDER BY createdAt ASC")
+    /**
+     * 标签列表顺序。
+     *
+     * 手动排过序的（`sortOrder` 非空）排前面，按位次升序；
+     * 没排过的（NULL）排在后面，按创建时间 —— 新建的标签默认落在末尾，
+     * 而不是插到用户精心排好的序列中间。
+     */
+    @Query("SELECT * FROM tags ORDER BY (sortOrder IS NULL) ASC, sortOrder ASC, createdAt ASC")
     fun observeAll(): Flow<List<TagEntity>>
 
     /** 全部「漫画 ↔ 标签」关系，供书架搜索按标签名匹配时使用。 */
     @Query("SELECT * FROM comic_tags")
     fun observeAllRelations(): Flow<List<ComicTagEntity>>
 
-    @Query("SELECT * FROM tags ORDER BY createdAt ASC")
+    @Query("SELECT * FROM tags ORDER BY (sortOrder IS NULL) ASC, sortOrder ASC, createdAt ASC")
     suspend fun getAll(): List<TagEntity>
 
     @Query("SELECT * FROM tags WHERE id = :id")
@@ -55,11 +62,30 @@ interface TagDao {
     @Query("UPDATE tags SET color = :color WHERE id IN (:ids)")
     suspend fun setColorMany(ids: List<Long>, color: Int)
 
+    /** 写入手动排序位次（0 起）。 */
+    @Query("UPDATE tags SET sortOrder = :order WHERE id = :id")
+    suspend fun setSortOrder(id: Long, order: Int)
+
     @Query("DELETE FROM tags WHERE id = :id")
     suspend fun deleteById(id: Long)
 
     @Query("DELETE FROM tags")
     suspend fun clearAll()
+
+    /**
+     * 清空全部「漫画 ↔ 标签」关系。
+     *
+     * 覆盖恢复时必须连着调一次：`comic_tags` 是一张独立的多对多表，
+     * 删 `comics` 和 `tags` 都不会带走它（表上没有外键）。不清的话，
+     * 恢复后库里会留下一批指向已不存在 id 的孤儿关系 —— 平时看不见，
+     * 但一旦新插入的漫画 / 标签恰好复用了旧 id，就会「凭空多出」一个标签。
+     */
+    @Query("DELETE FROM comic_tags")
+    suspend fun clearRelations()
+
+    /** 关系总条数，用于恢复后向用户报告「标签挂上了多少条」。 */
+    @Query("SELECT COUNT(*) FROM comic_tags")
+    suspend fun relationCountAll(): Int
 
     // ------------------------------------------------------------ 关系
 

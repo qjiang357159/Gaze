@@ -2,6 +2,7 @@ package com.gaze.reader.ui
 
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.tween
@@ -34,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,6 +72,8 @@ import com.gaze.reader.ui.screens.LibraryScreen
 import com.gaze.reader.ui.screens.LibrarySettingsScreen
 import com.gaze.reader.ui.screens.LibraryViewModel
 import com.gaze.reader.ui.screens.MediaSettingsScreen
+import com.gaze.reader.ui.screens.MissingScreen
+import com.gaze.reader.ui.screens.MissingViewModel
 import com.gaze.reader.ui.screens.NamingSettingsScreen
 import com.gaze.reader.ui.screens.PageLoader
 import com.gaze.reader.ui.screens.ReaderScreen
@@ -117,6 +121,7 @@ object Routes {
     const val SETTINGS_MEDIA = "settings/media"
     const val SETTINGS_NAMING = "settings/naming"
     const val SETTINGS_BACKUP = "settings/backup"
+    const val SETTINGS_MISSING = "settings/missing"
     const val SETTINGS_ABOUT = "settings/about"
 
     fun reader(id: Long) = "reader/$id"
@@ -242,6 +247,9 @@ fun GazeRoot(
                 ScreenInsets {
                     SettingsBackupRoute(viewModel = settingsViewModel, navController = navController)
                 }
+            }
+            composable(Routes.SETTINGS_MISSING) {
+                ScreenInsets { MissingRoute(navController = navController) }
             }
             composable(Routes.SETTINGS_ABOUT) {
                 ScreenInsets { AboutSettingsScreen(onBack = { navController.popBackStack() }) }
@@ -372,14 +380,50 @@ private fun LibraryRoute(
 
     // 点进某个书架文件夹时只记 key，组对象本身从最新状态里取 ——
     // 直接记住整个 ShelfGroup 会在封面或内容变化后变成一份过期快照。
-    var openedGroupKey by remember { mutableStateOf<String?>(null) }
+    //
+    // 用 rememberSaveable 而不是 remember：从文件夹里点进阅读页 / 详情页时，
+    // 书架这一层会离开组合，remember 的值随之丢失 —— 返回时「啪」地掉回书架首页，
+    // 而不是回到刚才那个文件夹。存进 back stack entry 的 saved state 才能跨页保住。
+    var openedGroupKey by rememberSaveable { mutableStateOf<String?>(null) }
     val openedGroup: ShelfGroup? = openedGroupKey?.let { key ->
         state.groups.firstOrNull { it.key == key }
     }
 
-    // 切换视图 / 搜索时自动退出文件夹，否则会停在一个已经不属于当前视图的组里
+    // 切换视图 / 搜索时自动退出文件夹，否则会停在一个已经不属于当前视图的组里。
+    //
+    // 判据刻意是「**变了**」而不是「首次组合」：从阅读页返回时这段逻辑也会重新跑，
+    // 若无条件置空，用户刚在文件夹里读了两页、一返回就被踢回书架首页。
+    var lastView by remember { mutableStateOf(state.view) }
+    var lastQuery by remember { mutableStateOf(state.query) }
     LaunchedEffect(state.view, state.query) {
-        openedGroupKey = null
+        if (state.view != lastView || state.query != lastQuery) {
+            openedGroupKey = null
+            lastView = state.view
+            lastQuery = state.query
+        }
+    }
+
+    // 组已经不存在了（标签被删、文件夹取消授权）却还留着 key：
+    // 界面上看不出任何层级，返回手势却被它白白吃掉一次。清掉。
+    LaunchedEffect(openedGroup, state.loading) {
+        if (openedGroupKey != null && openedGroup == null && !state.loading) {
+            openedGroupKey = null
+        }
+    }
+
+    // 系统返回（手势 / 实体键）在书架页按「层级」逐级退：文件夹 -> 选择模式 -> 搜索词，
+    // 三样都没有了才轮到导航把应用退到后台。
+    //
+    // 不拦的话，文件夹打开着按返回会直接退出应用 —— 用户以为自己在「上一级」，
+    // 结果整个应用没了。这是本页唯一的层级状态，必须自己接住。
+    BackHandler(
+        enabled = openedGroupKey != null || state.selectionMode || state.query.isNotEmpty()
+    ) {
+        when {
+            openedGroupKey != null -> openedGroupKey = null
+            state.selectionMode -> viewModel.clearSelection()
+            else -> viewModel.setQuery("")
+        }
     }
 
     // 启动自动扫描**每个进程只做一次**。
@@ -470,6 +514,10 @@ private fun TagsRoute(container: AppContainer, navController: NavController) {
     val message by viewModel.messages.collectAsStateWithLifecycle()
     val selection by viewModel.selection.collectAsStateWithLifecycle()
 
+    // 批量选择中按返回先退出选择 —— 与书架页同一条规则：
+    // 有层级就先退层级，别一步把应用关掉。
+    BackHandler(enabled = selection.isNotEmpty()) { viewModel.clearSelection() }
+
     message?.let {
         AlertDialog(
             onDismissRequest = viewModel::consumeMessage,
@@ -493,7 +541,8 @@ private fun TagsRoute(container: AppContainer, navController: NavController) {
         onCreate = viewModel::createTag,
         onRename = viewModel::renameTag,
         onSetColor = viewModel::setColor,
-        onDelete = viewModel::deleteTag
+        onDelete = viewModel::deleteTag,
+        onReorder = viewModel::reorder
     )
 }
 
@@ -604,6 +653,7 @@ private fun SettingsMediaRoute(viewModel: SettingsViewModel, navController: NavC
     val folders by viewModel.folders.collectAsStateWithLifecycle()
     val scan by viewModel.scan.collectAsStateWithLifecycle()
     val health by viewModel.health.collectAsStateWithLifecycle()
+    val missingCount by viewModel.missingCount.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
 
     MediaSettingsScreen(
@@ -613,6 +663,7 @@ private fun SettingsMediaRoute(viewModel: SettingsViewModel, navController: NavC
         scan = scan,
         health = health,
         message = message,
+        missingCount = missingCount,
         onAddFolder = viewModel::addFolder,
         onRemoveFolder = viewModel::removeFolder,
         onScan = viewModel::startScan,
@@ -621,6 +672,7 @@ private fun SettingsMediaRoute(viewModel: SettingsViewModel, navController: NavC
         onHealthCheck = viewModel::startHealthCheck,
         onCancelHealthCheck = viewModel::cancelHealthCheck,
         onDismissHealthReport = viewModel::dismissHealthReport,
+        onOpenMissing = { navController.navigate(Routes.SETTINGS_MISSING) },
         onSetAutoScan = viewModel::setAutoScan,
         onConsumeMessage = viewModel::consumeMessage,
         onBack = { navController.popBackStack() }
@@ -647,6 +699,7 @@ private fun SettingsBackupRoute(viewModel: SettingsViewModel, navController: Nav
     val backups by viewModel.backups.collectAsStateWithLifecycle()
     val missingReport by viewModel.missingReport.collectAsStateWithLifecycle()
     val pendingRestore by viewModel.pendingRestore.collectAsStateWithLifecycle()
+    val lastRestore by viewModel.lastRestore.collectAsStateWithLifecycle()
 
     // 备份默认文件名只在进入本页时算一次，避免每次重组都跟着时钟变
     val suggestedName = remember { viewModel.suggestedBackupName() }
@@ -656,6 +709,7 @@ private fun SettingsBackupRoute(viewModel: SettingsViewModel, navController: Nav
         backups = backups,
         missingReport = missingReport,
         pendingRestore = pendingRestore,
+        lastRestore = lastRestore,
         suggestedName = suggestedName,
         onSetBackupFolder = viewModel::setBackupFolder,
         onClearBackupFolder = viewModel::clearBackupFolder,
@@ -672,6 +726,18 @@ private fun SettingsBackupRoute(viewModel: SettingsViewModel, navController: Nav
         onForgetLastExport = viewModel::forgetLastExport,
         onConfirmRestore = viewModel::confirmRestore,
         onCancelPendingRestore = viewModel::cancelPendingRestore,
+        onDismissRestoreResult = viewModel::dismissRestoreResult,
+        onOpenMissing = { navController.navigate(Routes.SETTINGS_MISSING) },
+        onBack = { navController.popBackStack() }
+    )
+}
+
+/** 媒体匹配：恢复备份之后，把「找不到文件」的漫画重新指回本机。 */
+@Composable
+private fun MissingRoute(navController: NavController) {
+    val viewModel: MissingViewModel = viewModel(factory = AppViewModelProvider.Factory)
+    MissingScreen(
+        viewModel = viewModel,
         onBack = { navController.popBackStack() }
     )
 }

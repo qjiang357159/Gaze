@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -45,6 +46,7 @@ import com.gaze.reader.BuildConfig
 import com.gaze.reader.backup.BackupEntry
 import com.gaze.reader.backup.BackupFormat
 import com.gaze.reader.backup.BackupInfo
+import com.gaze.reader.backup.BackupResult
 import com.gaze.reader.backup.MissingReport
 import com.gaze.reader.backup.RestoreMode
 import com.gaze.reader.core.AutoBackupInterval
@@ -455,6 +457,7 @@ fun MediaSettingsScreen(
     scan: ScanProgress?,
     health: HealthReport?,
     message: String?,
+    missingCount: Int,
     onAddFolder: (Uri) -> Unit,
     onRemoveFolder: (String) -> Unit,
     onScan: () -> Unit,
@@ -463,6 +466,7 @@ fun MediaSettingsScreen(
     onHealthCheck: () -> Unit,
     onCancelHealthCheck: () -> Unit,
     onDismissHealthReport: () -> Unit,
+    onOpenMissing: () -> Unit,
     onSetAutoScan: (Boolean) -> Unit,
     onConsumeMessage: () -> Unit,
     onBack: () -> Unit
@@ -478,6 +482,11 @@ fun MediaSettingsScreen(
         }
     }
 
+    // 授权过的与「待重新授权」的分开渲染：混在一张清单里，用户根本分不清
+    // 哪个是真的能扫、哪个只是一条来自备份的线索。
+    val authorized = folders.filter { it.pending != true }
+    val pendingFolders = folders.filter { it.pending == true }
+
     SettingsPage(
         title = "扫描与存储",
         subtitle = "${stats?.totalCount ?: 0} 本 · ${Formatters.fileSize(stats?.totalBytes ?: 0L, "0 B")}",
@@ -492,10 +501,10 @@ fun MediaSettingsScreen(
 
         SettingsSection("已授权文件夹", icon = GazeIcons.Folder) {
             SettingsNote("Gaze 只读取你主动授权的目录，不做全盘扫描。")
-            if (folders.isEmpty()) {
+            if (authorized.isEmpty()) {
                 SettingsNote("还没有授权任何文件夹。")
             } else {
-                folders.forEach { folder ->
+                authorized.forEach { folder ->
                     FolderRow(folder = folder, onRemove = { onRemoveFolder(folder.uri) })
                 }
             }
@@ -510,6 +519,37 @@ fun MediaSettingsScreen(
                     modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = { folderLauncher.launch(null) }) { Text("选择") }
+            }
+        }
+
+        if (pendingFolders.isNotEmpty()) {
+            SettingsSection("待重新授权的文件夹", icon = GazeIcons.Info) {
+                SettingsNote(
+                    "这些目录来自一份恢复回来的备份。备份文件里存不下 SAF 读权限，" +
+                        "所以它们还不是已授权状态 —— 重新点一次目录选择器，它们就能照常扫描。"
+                )
+                pendingFolders.forEach { folder ->
+                    PendingFolderRow(
+                        folder = folder,
+                        onAuthorize = { folderLauncher.launch(null) },
+                        onIgnore = { onRemoveFolder(folder.uri) }
+                    )
+                    Hairline(Modifier.padding(start = SettingsRowInset))
+                }
+            }
+        }
+
+        if (missingCount > 0) {
+            SettingsSection("媒体匹配", icon = Icons.Default.Warning) {
+                SettingsNote(
+                    "$missingCount 本漫画在本机找不到对应文件。阅读进度、收藏和标签都还留着，" +
+                        "重新指定文件位置就能接回来。"
+                )
+                ActionRow(
+                    label = "去媒体匹配",
+                    subtitle = "手动重新定位，或让 Gaze 自己按内容找",
+                    onClick = onOpenMissing
+                )
             }
         }
 
@@ -600,6 +640,49 @@ private fun FolderRow(folder: FolderEntity, onRemove: () -> Unit) {
                 TextButton(onClick = { confirm = false }) { Text("保留") }
             }
         )
+    }
+}
+
+/**
+ * 一条「待重新授权」的文件夹。
+ *
+ * 刻意不复用 [FolderRow]：那条上的按钮是「取消授权」，而这里的语义是
+ * 「还没授权、要不要现在授权」—— 同一个位置放两个含义相反的按钮，
+ * 用户点错一次就会把一条本来能救回来的目录记录删掉。
+ */
+@Composable
+private fun PendingFolderRow(
+    folder: FolderEntity,
+    onAuthorize: () -> Unit,
+    onIgnore: () -> Unit
+) {
+    val colors = gazeColors
+    Row(
+        Modifier.fillMaxWidth().padding(start = SettingsRowInset, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = folder.displayName,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = UriDisplay.readable(folder.uri),
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.inkFaint,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        TextButton(onClick = onIgnore) {
+            Text("忽略", style = MaterialTheme.typography.bodySmall, color = colors.inkFaint)
+        }
+        TextButton(onClick = onAuthorize) {
+            Text("重新授权", style = MaterialTheme.typography.bodySmall, color = colors.accent)
+        }
     }
 }
 
@@ -891,6 +974,7 @@ fun BackupSettingsScreen(
     backups: List<BackupEntry>,
     missingReport: MissingReport?,
     pendingRestore: Pair<Uri, BackupInfo>?,
+    lastRestore: BackupResult?,
     suggestedName: String,
     onSetBackupFolder: (Uri, String) -> Unit,
     onClearBackupFolder: () -> Unit,
@@ -907,6 +991,8 @@ fun BackupSettingsScreen(
     onForgetLastExport: () -> Unit,
     onConfirmRestore: (RestoreMode) -> Unit,
     onCancelPendingRestore: () -> Unit,
+    onDismissRestoreResult: () -> Unit,
+    onOpenMissing: () -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -935,9 +1021,40 @@ fun BackupSettingsScreen(
     SettingsPage(title = "备份与恢复", onBack = onBack) {
         SettingsSection("说明", icon = GazeIcons.Info) {
             SettingsNote(
-                "备份只包含元数据（阅读进度、收藏、标签、设置、文件夹授权），" +
-                    "不复制漫画原文件 —— 否则几百 GB 的漫画库会让备份大到没法用。"
+                "备份只包含元数据 —— 阅读进度、收藏、标签与标签顺序、文件夹归属、" +
+                    "书架封面、阅读统计、全部设置。不复制漫画原文件，否则几百 GB 的漫画库" +
+                    "会让备份大到没法用。"
             )
+            SettingsNote(
+                "文件夹授权是唯一带不过去的东西：SAF 的读权限绑定在「你亲自点过一次目录选择器」" +
+                    "这件事上，备份文件里存不下。恢复后需要你重新授权一次才能继续扫描。"
+            )
+        }
+
+        // ---------------------------------------------------- 上次恢复的结果
+        lastRestore?.let { result ->
+            SettingsSection("上次恢复的结果", icon = GazeIcons.Info) {
+                SettingsNote(result.message)
+                if (result.pending > 0 || result.pendingFolders > 0) {
+                    ActionRow(
+                        label = "去媒体匹配",
+                        subtitle = buildString {
+                            append("把 ${result.pending} 本待重新定位的漫画接回本机文件")
+                            if (result.pendingFolders > 0) {
+                                append("；先重新授权 ${result.pendingFolders} 个文件夹")
+                            }
+                        },
+                        onClick = onOpenMissing
+                    )
+                    Hairline(Modifier.padding(start = SettingsRowInset))
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(end = 8.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    TextButton(onClick = onDismissRestoreResult) { Text("知道了") }
+                }
+            }
         }
 
         // ---------------------------------------------------- 备份文件夹
@@ -1195,7 +1312,10 @@ private fun RestoreDialog(
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Text(
-                    text = "备份版本：${info.appVersion} · 含 ${info.comicCount} 本漫画、${info.tagCount} 个标签",
+                    text = buildString {
+                        append("备份版本：${info.appVersion} · 含 ${info.comicCount} 本漫画、${info.tagCount} 个标签")
+                        if (info.relationCount > 0) append("（${info.relationCount} 条标签关系）")
+                    },
                     style = MaterialTheme.typography.bodyMedium
                 )
                 Spacer(Modifier.height(16.dp))
@@ -1321,6 +1441,35 @@ private data class ReleaseNote(val version: String, val items: List<String>)
  * 更新日志是给人扫的，不是给人读的。
  */
 private val CHANGELOG = listOf(
+    ReleaseNote(
+        version = "1.7.1",
+        items = listOf(
+            "修复「先恢复备份、再授权扫描」时标签与阅读进度丢失 —— 扫描现在会把备份留下的记录直接接回文件，而不是另建一条新的",
+            "扫描时自动合并此前产生的重复记录：历史数据会并回保留的那条，不留空壳",
+            "媒体匹配改为按原文件夹分组，点进文件夹才看具体是哪几本",
+            "手动重新定位时，如果指到的文件本来就在库里，改为合并历史数据而不是产生重复"
+        )
+    ),
+    ReleaseNote(
+        version = "1.7.0",
+        items = listOf(
+            "新增「媒体匹配」：恢复备份后找不到文件的漫画会列在这里，可以手动重新定位，也可以让 Gaze 自己扫一遍按内容接回",
+            "恢复备份不再把备份里记录的文件夹当成已授权，改为「待重新授权」，重新指一次目录即可继续扫描",
+            "修复恢复备份后漫画上的标签丢失",
+            "备份补全了此前漏掉的字段：标签顺序、文件夹归属、容器格式、手动改过的标题与作者、书架封面、阅读统计",
+            "修复标签页上下滑动时容易误点进标签详情"
+        )
+    ),
+    ReleaseNote(
+        version = "1.6.0",
+        items = listOf(
+            "标签支持长按拖动排序，顺序会被记住（长按不动仍是批量管理）",
+            "修复书架文件夹里返回会直接退出应用",
+            "修复从阅读页返回会掉回书架首页、而不是刚才那个文件夹",
+            "修复新建标签时选的颜色被自动推荐色顶掉",
+            "搜索框右侧新增说明：多个条件用空格分开"
+        )
+    ),
     ReleaseNote(
         version = "1.5.1",
         items = listOf(

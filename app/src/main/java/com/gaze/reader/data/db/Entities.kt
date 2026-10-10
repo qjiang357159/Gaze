@@ -129,7 +129,17 @@ data class TagEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val name: String,
     val color: Int,
-    val createdAt: Long
+    val createdAt: Long,
+
+    /**
+     * 用户拖动排序后的位次。
+     *
+     * 可空、无默认值 —— 带 `DEFAULT` 的 `ADD COLUMN` 会和 Room 编译期 schema
+     * 对不上，运行时直接抛异常（v1→v2 踩过这个坑）。
+     *
+     * null 表示「用户还没手动排过」，此时按创建时间排在所有排过序的标签之后。
+     */
+    val sortOrder: Int? = null
 )
 
 /** 漫画 ↔ 标签 多对多关系。 */
@@ -152,7 +162,20 @@ data class FolderEntity(
     val addedAt: Long,
     val lastScanAt: Long = 0,
     /** 该文件夹下最近一次扫描发现的漫画数量。 */
-    val comicCount: Int = 0
+    val comicCount: Int = 0,
+
+    /**
+     * 「待重新授权」—— 这个文件夹来自一份恢复回来的备份，本机还没有真正拿到它的读权限。
+     *
+     * 恢复备份时**绝不能**把备份里记的 uri 直接当成已授权：SAF 的读权限是跟着
+     * 「用户点过系统目录选择器」这件事走的，备份文件里存不下它。旧实现直接调
+     * `folders.add(...)` 写库，界面上就出现一个「已授权」的文件夹，
+     * 但每次扫描都读不到任何文件，用户完全不知道为什么。
+     *
+     * 可空、无默认值（Room 迁移的老规矩）：null 与 false 都表示真正授权，
+     * 只有显式的 true 才是「等你重新授权」。扫描器与书架都不认它。
+     */
+    val pending: Boolean? = null
 )
 
 /**

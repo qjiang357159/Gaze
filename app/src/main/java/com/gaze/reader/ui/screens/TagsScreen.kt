@@ -3,6 +3,9 @@ package com.gaze.reader.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,6 +42,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,9 +51,16 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import com.gaze.reader.core.Formatters
 import com.gaze.reader.core.SortOrder
 import com.gaze.reader.data.db.ComicEntity
@@ -89,10 +100,11 @@ fun TagsScreen(
     onSelectAll: () -> Unit,
     onBatchDelete: () -> Unit,
     onBatchColor: (Int) -> Unit,
-    onCreate: (String) -> Unit,
+    onCreate: (String, Int) -> Unit,
     onRename: (Long, String) -> Unit,
     onSetColor: (Long, Int) -> Unit,
-    onDelete: (Long, String) -> Unit
+    onDelete: (Long, String) -> Unit,
+    onReorder: (List<Long>) -> Unit
 ) {
     var editorTarget by remember { mutableStateOf<TagWithCount?>(null) }
     var showCreate by remember { mutableStateOf(false) }
@@ -101,6 +113,32 @@ fun TagsScreen(
 
     val selectionMode = selection.isNotEmpty()
     val gridState = rememberLazyGridState()
+
+    // ------------------------------------------------------------ 拖动排序
+    //
+    // 长按标签：**不动松手 = 进入批量选择**（原有肌肉记忆照旧），
+    // **拖动 = 排序**。两者共用一个手势源，靠「有没有真的挪动」区分 ——
+    // 再单独挂一个长按监听的话，两个 500ms 判定会互相抢，必然有一个永远不触发。
+    var draggingId by remember { mutableStateOf<Long?>(null) }
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+    var movedEnough by remember { mutableStateOf(false) }
+
+    // 拖动期间用本地顺序渲染（让其他卡片实时让位），松手提交后再交还给数据源。
+    var localIds by remember { mutableStateOf<List<Long>?>(null) }
+    val display = remember(tags, localIds) {
+        val ids = localIds
+        if (ids == null) tags else ids.mapNotNull { id -> tags.firstOrNull { it.id == id } }
+    }
+
+    // 提交后数据库回流要一两帧。顺序对上了才把控制权交还，
+    // 否则会先闪一下旧顺序、再跳到新顺序。
+    LaunchedEffect(tags) {
+        val ids = localIds ?: return@LaunchedEffect
+        if (tags.map { it.id } == ids) localIds = null
+    }
+
+    val dragShape = remember { RoundedCornerShape(6.dp) }
+    val haptic = LocalHapticFeedback.current
 
     Column(Modifier.fillMaxSize()) {
         ScreenTitle(
@@ -138,7 +176,112 @@ fun TagsScreen(
 
         Hairline()
 
-        Box(Modifier.weight(1f)) {
+        Box(
+            Modifier
+                .weight(1f)
+                // 长按与拖动排序的手势。
+                //
+                // 挂在**容器**上而不是每张卡片上：卡片坐标会随重排变化，
+                // 挂在卡片上会让「手指位置 -> 目标格子」的换算在让位那一帧错位；
+                // 挂在这个不动的容器上，坐标自始至终只有一个参照系。
+                //
+                // 它能成立的前提是**卡片不消费指针事件**（见 TagCard 里那段注释）——
+                // 长按判定要求 down 是干净的，而 clickable 会把 down 消费掉，
+                // 于是长按会被判成「被别的手势抢走」，批量管理和拖动排序会一起失灵。
+                .then(
+                    if (selectionMode) Modifier
+                    else Modifier.pointerInput(tags) {
+                        val slop = viewConfiguration.touchSlop
+                        detectDragGesturesAfterLongPress(
+                            onDragStart = { position ->
+                                val hit = gridState.layoutInfo.visibleItemsInfo
+                                    .firstOrNull { item ->
+                                        position.x >= item.offset.x &&
+                                            position.x < item.offset.x + item.size.width &&
+                                            position.y >= item.offset.y &&
+                                            position.y < item.offset.y + item.size.height
+                                    }
+                                val id = hit?.key as? Long
+                                    ?: return@detectDragGesturesAfterLongPress
+                                draggingId = id
+                                localIds = tags.map { it.id }
+                                dragOffset = Offset.Zero
+                                movedEnough = false
+                                // 长按成立时震一下：手指底下有反馈，用户才知道
+                                // 「现在松手是批量管理，继续挪是排序」。
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+                            },
+                            onDrag = { change, delta ->
+                                val id = draggingId
+                                    ?: return@detectDragGesturesAfterLongPress
+                                change.consume()
+                                dragOffset += delta
+                                if (!movedEnough) {
+                                    // 长按之后几乎没挪 = 用户要的是批量管理，不是排序。
+                                    // 用位移而不是时间区分：手抖一下不该把排序误判成选择。
+                                    if (dragOffset.getDistance() <= slop) {
+                                        return@detectDragGesturesAfterLongPress
+                                    }
+                                    movedEnough = true
+                                }
+
+                                val info = gridState.layoutInfo
+                                val self = info.visibleItemsInfo
+                                    .firstOrNull { it.key == id }
+                                    ?: return@detectDragGesturesAfterLongPress
+                                val centerX = self.offset.x + self.size.width / 2f + dragOffset.x
+                                val centerY = self.offset.y + self.size.height / 2f + dragOffset.y
+                                // 卡片中心离谁最近，就该换到谁的位置上
+                                val target = info.visibleItemsInfo
+                                    .filter { it.key != id }
+                                    .minByOrNull { other ->
+                                        val dx = other.offset.x + other.size.width / 2f - centerX
+                                        val dy = other.offset.y + other.size.height / 2f - centerY
+                                        dx * dx + dy * dy
+                                    }
+                                    ?: return@detectDragGesturesAfterLongPress
+
+                                val ids = localIds
+                                    ?: return@detectDragGesturesAfterLongPress
+                                val from = ids.indexOf(id)
+                                val to = target.index
+                                if (from < 0 || to < 0 || from == to) {
+                                    return@detectDragGesturesAfterLongPress
+                                }
+
+                                localIds = ids.toMutableList().apply { add(to, removeAt(from)) }
+                                // 让位之后被拖的卡片会「落」进目标格子，
+                                // 把这段位移从累积量里减掉，卡片才会稳稳停在手指下。
+                                dragOffset -= Offset(
+                                    (target.offset.x - self.offset.x).toFloat(),
+                                    (target.offset.y - self.offset.y).toFloat()
+                                )
+                            },
+                            onDragEnd = {
+                                val id = draggingId
+                                val ids = localIds
+                                if (id != null && movedEnough && ids != null) {
+                                    onReorder(ids)
+                                    // localIds 先留着，等数据库回流后再交还，免得闪回旧顺序
+                                } else {
+                                    // 长按了但没挪：回到原本的语义 —— 批量管理。
+                                    if (id != null) onToggleSelect(id)
+                                    localIds = null
+                                }
+                                draggingId = null
+                                dragOffset = Offset.Zero
+                                movedEnough = false
+                            },
+                            onDragCancel = {
+                                draggingId = null
+                                dragOffset = Offset.Zero
+                                movedEnough = false
+                                localIds = null
+                            }
+                        )
+                    }
+                )
+        ) {
             if (tags.isEmpty()) {
                 EmptyState(
                     title = "还没有标签",
@@ -157,19 +300,40 @@ fun TagsScreen(
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.fillMaxSize()
                 ) {
-                    items(tags, key = { "tag-${it.id}" }) { tag ->
-                        TagCard(
-                            accent = Color(tag.color),
-                            name = tag.name,
-                            countLabel = "${tag.comicCount} 本",
-                            selectionMode = selectionMode,
-                            selected = tag.id in selection,
-                            onClick = {
-                                if (selectionMode) onToggleSelect(tag.id) else onOpenTag(tag.id)
-                            },
-                            onLongClick = { onToggleSelect(tag.id) },
-                            onEdit = { editorTarget = tag }
-                        )
+                    items(display, key = { it.id }) { tag ->
+                        val dragging = tag.id == draggingId
+                        // 被拖的那张不用 animateItem：它的位移由手指直接驱动，
+                        // 再叠一层位置动画只会让它追着手指跑，越拖越滞后。
+                        val base = if (dragging) Modifier else Modifier.animateItem()
+                        Box(
+                            base
+                                .zIndex(if (dragging) 1f else 0f)
+                                .graphicsLayer {
+                                    if (dragging) {
+                                        translationX = dragOffset.x
+                                        translationY = dragOffset.y
+                                        // 长按一成立就抬起。它同时是「长按生效了」的反馈：
+                                        // 抬着不动再松手 = 批量管理，抬着挪走 = 排序。
+                                        scaleX = 1.05f
+                                        scaleY = 1.05f
+                                        shadowElevation = 14f
+                                        shape = dragShape
+                                        clip = false
+                                    }
+                                }
+                        ) {
+                            TagCard(
+                                accent = Color(tag.color),
+                                name = tag.name,
+                                countLabel = "${tag.comicCount} 本",
+                                selectionMode = selectionMode,
+                                selected = tag.id in selection,
+                                onClick = {
+                                    if (selectionMode) onToggleSelect(tag.id) else onOpenTag(tag.id)
+                                },
+                                onEdit = { editorTarget = tag }
+                            )
+                        }
                     }
                 }
                 LazyGridScrollbar(
@@ -198,10 +362,13 @@ fun TagsScreen(
         TagEditDialog(
             title = "新建标签",
             initialName = "",
-            initialColor = TagPalette.COLORS[tags.size % TagPalette.COLORS.size],
+            // 默认色用「第一个还没被用过的」——和仓库自动推荐的口径一致。
+            // 之前是按下标取色，和实际落库的颜色对不上，用户看到的默认色是假的。
+            initialColor = TagPalette.nextUnused(tags.map { it.color }),
             onDismiss = { showCreate = false },
-            onConfirm = { name, _ ->
-                onCreate(name)
+            onConfirm = { name, color ->
+                // 这里必须把 color 传下去：对话框里选了什么就用什么。
+                onCreate(name, color)
                 showCreate = false
             }
         )
@@ -326,6 +493,9 @@ private fun FavoriteEntryCard(
  * 「收藏」复用同一个组件（只是没有编辑按钮），于是它和标签卡片的边界、
  * 圆角、配色完全一致，放在网格里毫无突兀感。
  *
+ * 长按**不在这里**处理：长按既可能变成拖动排序、也可能变成批量选择，
+ * 两者共用一个判定，统一交给网格上那层手势处理，卡片自己只认点击。
+ *
  * @param onEdit 传 null 表示这张卡片不可编辑（收藏卡片）。
  */
 @Composable
@@ -336,11 +506,11 @@ private fun TagCard(
     selectionMode: Boolean,
     selected: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit,
     onEdit: (() -> Unit)? = null
 ) {
     val colors = gazeColors
     val shape = RoundedCornerShape(6.dp)
+    var pressed by remember { mutableStateOf(false) }
 
     Column(
         Modifier
@@ -348,12 +518,63 @@ private fun TagCard(
             .height(TAG_CARD_HEIGHT)
             .clip(shape)
             .background(MaterialTheme.colorScheme.surfaceVariant)
+            // 按压反馈自己画：这里不能用 clickable，也就没有它的水波纹。
+            .background(if (pressed) colors.ink.copy(alpha = 0.05f) else Color.Transparent)
             .border(
                 width = if (selected) 1.5.dp else 1.dp,
                 color = if (selected) colors.accent else colors.hairline,
                 shape = shape
             )
-            .combinedClickableCompat(onClick = onClick, onLongClick = onLongClick)
+            // 点击自己实现，**刻意不消费任何指针事件**。
+            //
+            // 长按判定挂在网格容器上，而 clickable 会在 Main pass 把 down 消费掉 ——
+            // 容器那边一看「down 已被消费」就认定长按被别的手势抢走，直接放弃，
+            // 于是长按永远不成立，批量管理和拖动排序会一起失灵。这里只观察、不消费。
+            //
+            // 代价是没有水波纹，所以要自己补两件事：
+            //  * 按下时叠一层极淡的墨色（就是上面那层 background）；
+            //  * 自己把「不算点击」的几种情况排除掉（见下）。
+            //
+            // 判定写在 **Final pass** 上：Main pass 之后所有手势该消费的都消费完了，
+            // 在这里能一次性看清「这一串事件到底有没有被别人拿走」。
+            .pointerInput(Unit) {
+                val longPressTimeout = viewConfiguration.longPressTimeoutMillis
+                val slop = viewConfiguration.touchSlop
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    pressed = true
+                    var upTime: Long? = null
+                    var cancelled = false
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Final)
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        // 被别人消费了 —— 滚动接管了这次手势，不该再算点击。
+                        //
+                        // 这一条是「上下滑动老是点进标签里」的正解：LazyGrid 的滚动
+                        // 在 Main pass 消费 move，而只按「按下时长」判定的话，
+                        // 一次快速的滑动（按下到抬起不到 500ms）会被整段误判成点击。
+                        if (change.isConsumed) {
+                            cancelled = true
+                            break
+                        }
+                        // 位移兜底：滚动还没到消费那一步时，手指早就滑出 touchSlop 了。
+                        if ((change.position - down.position).getDistance() > slop) {
+                            cancelled = true
+                            break
+                        }
+                        if (!change.pressed) {
+                            upTime = change.uptimeMillis
+                            break
+                        }
+                    }
+                    pressed = false
+                    // 长按之后的那次抬手也要排除：容器在长按后消费了后续事件，
+                    // 唯独 up 是它来不及消费的那一个，不按时长兜一道的话，
+                    // 长按松手会顺带把标签详情打开。
+                    val held = upTime?.minus(down.uptimeMillis)
+                    if (!cancelled && held != null && held < longPressTimeout) onClick()
+                }
+            }
             .padding(start = 12.dp, end = 8.dp, top = 10.dp, bottom = 8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {

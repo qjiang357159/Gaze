@@ -79,6 +79,26 @@ class StatsRepository(
 
     suspend fun count(): Int = runCatching { statsDao.count() }.getOrDefault(0)
 
+    /** 全量会话 —— 导出备份时用。 */
+    suspend fun getAll(): List<ReadingSessionEntity> =
+        runCatching { statsDao.getAll() }.getOrDefault(emptyList())
+
+    /**
+     * 恢复备份时批量写回历史会话。
+     *
+     * 与 [record] 的区别是**不过滤时长** —— 那条 5 秒闸门是防「翻两页就退出」
+     * 制造噪声的，而备份里的每一条都是当初已经通过过闸门的数据，再滤一遍
+     * 只会把用户真实的短时阅读记录吃掉。
+     */
+    suspend fun restoreAll(sessions: List<ReadingSessionEntity>): Int {
+        if (sessions.isEmpty()) return 0
+        var written = 0
+        sessions.forEach { session ->
+            if (runCatching { statsDao.insert(session) }.getOrDefault(-1L) > 0L) written++
+        }
+        return written
+    }
+
     suspend fun clear() {
         runCatching { statsDao.clearAll() }
     }

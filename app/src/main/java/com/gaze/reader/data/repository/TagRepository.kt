@@ -30,6 +30,9 @@ class TagRepository(private val tagDao: TagDao) {
     fun observeAll(): Flow<List<TagEntity>> = tagDao.observeAll()
     fun observeTagsOfComic(comicId: Long): Flow<List<TagEntity>> = tagDao.observeTagsOfComic(comicId)
 
+    /** 全量「漫画 ↔ 标签」关系流 —— 需要按标签名反查漫画时用（媒体匹配页）。 */
+    fun observeAllRelations(): Flow<List<ComicTagEntity>> = tagDao.observeAllRelations()
+
     suspend fun getAll(): List<TagEntity> = tagDao.getAll()
     suspend fun getById(id: Long): TagEntity? = tagDao.getById(id)
     suspend fun tagsOfComic(comicId: Long): List<TagEntity> = tagDao.tagsOfComic(comicId)
@@ -55,6 +58,48 @@ class TagRepository(private val tagDao: TagDao) {
     suspend fun createMany(names: Collection<String>): List<TagEntity> =
         names.mapNotNull { create(it) }
 
+    /**
+     * 恢复备份时按备份里的原始数据建标签。
+     *
+     * 与 [create] 的区别是**保留备份里的 `createdAt` 与 `sortOrder`**：
+     * 走 create 的话时间会变成「现在」、位次会变成 NULL，恢复出来的标签
+     * 顺序直接退化成按恢复顺序排 —— 用户手动拖出来的那一列白排了。
+     *
+     * 重名复用已有的（本地已经有同名标签时不该再建一个），返回标签 id；
+     * 名字为空或插入失败返回 -1。
+     */
+    suspend fun restore(name: String, color: Int, createdAt: Long, sortOrder: Int?): Long {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return -1L
+        tagDao.findByName(trimmed)?.let { return it.id }
+        val id = tagDao.insert(
+            TagEntity(
+                name = trimmed,
+                color = color,
+                createdAt = createdAt.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                sortOrder = sortOrder
+            )
+        )
+        return if (id > 0L) id else tagDao.findByName(trimmed)?.id ?: -1L
+    }
+
+    /**
+     * 恢复备份时把一组标签直接挂到某本漫画上。
+     *
+     * 与 [addTo] 同语义（`INSERT OR IGNORE`，已存在的关系自动跳过），
+     * 但省掉了「先查一遍已存在关系」的那次 IO —— 恢复时每本漫画都要挂一次，
+     * 逐本查库在几千本的库上会明显拖慢。
+     */
+    suspend fun attachAll(comicId: Long, tagIds: Collection<Long>): Int {
+        if (tagIds.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        val rows = tagIds.map { ComicTagEntity(comicId = comicId, tagId = it, createdAt = now) }
+        return tagDao.attachAll(rows).count { it > 0L }
+    }
+
+    /** 「漫画 ↔ 标签」关系总条数 —— 恢复后向用户报告用。 */
+    suspend fun relationCountAll(): Int = tagDao.relationCountAll()
+
     suspend fun rename(id: Long, name: String) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
@@ -64,6 +109,18 @@ class TagRepository(private val tagDao: TagDao) {
     }
 
     suspend fun setColor(id: Long, color: Int) = tagDao.setColor(id, color)
+
+    /**
+     * 按给定顺序重排标签（标签页长按拖动）。
+     *
+     * 写的是**绝对位次** 0..n-1，而不是「把 A 插到 B 前面」这种相对操作 ——
+     * 相对操作一旦被重复执行或与新建并发，就会出现两个标签抢同一个位次，
+     * 顺序从此不确定。绝对位次每次都是全量覆盖，怎么重入都是同一个结果。
+     */
+    suspend fun reorder(orderedIds: List<Long>) {
+        if (orderedIds.isEmpty()) return
+        orderedIds.forEachIndexed { index, id -> tagDao.setSortOrder(id, index) }
+    }
 
     /** 批量改色（标签长按批量管理用）。一条 SQL 搞定，不逐个更新。 */
     suspend fun setColorMany(ids: Collection<Long>, color: Int) {

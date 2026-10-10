@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.gaze.reader.backup.BackupEntry
 import com.gaze.reader.backup.BackupInfo
+import com.gaze.reader.backup.BackupResult
 import com.gaze.reader.backup.MissingReport
 import com.gaze.reader.backup.RestoreMode
 import com.gaze.reader.backup.autoBackupFileName
@@ -33,6 +34,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -53,6 +55,11 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
 
     val folders: StateFlow<List<FolderEntity>> = container.folderRepository.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** 待匹配（找不到文件）的漫画数量 —— 设置页据此决定要不要露出「媒体匹配」入口。 */
+    val missingCount: StateFlow<Int> = container.comicRepository.observeMissing()
+        .map { it.size }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     private val _scan = MutableStateFlow<ScanProgress?>(null)
     val scan: StateFlow<ScanProgress?> = _scan
@@ -284,7 +291,22 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
             _message.value = "正在恢复…"
             val result = container.backupRepository.restore(pending.first, mode)
             _message.value = result.message
+            if (result.success) {
+                // 恢复的明细留在页面上，而不是随提示条一起消失 ——
+                // 「多少本待重新定位」是用户接下来要不要去媒体匹配页的依据。
+                _lastRestore.value = result
+                refreshBackups()
+            }
         }
+    }
+
+    private val _lastRestore = MutableStateFlow<BackupResult?>(null)
+
+    /** 上一次恢复的完整结果（成功才非空）。 */
+    val lastRestore: StateFlow<BackupResult?> = _lastRestore
+
+    fun dismissRestoreResult() {
+        _lastRestore.value = null
     }
 
     /** 「恢复上次导出的备份」—— 绕开文件选择器，本机一定能走通。 */

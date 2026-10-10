@@ -6,6 +6,7 @@ import com.gaze.reader.core.NaturalOrder
 import com.gaze.reader.core.SortOrder
 import com.gaze.reader.data.db.ComicDao
 import com.gaze.reader.data.db.ComicEntity
+import com.gaze.reader.data.db.ComicTagEntity
 import com.gaze.reader.data.db.LibraryStats
 import com.gaze.reader.data.db.ShelfCoverDao
 import com.gaze.reader.data.db.ShelfCoverEntity
@@ -43,6 +44,7 @@ class ComicRepository(
         if (ids.isEmpty()) emptyList() else comicDao.getByIds(ids.toList())
     suspend fun getAll(): List<ComicEntity> = comicDao.getAll()
     suspend fun getAllPresent(): List<ComicEntity> = comicDao.getAllPresent()
+    suspend fun getMissing(): List<ComicEntity> = comicDao.getMissing()
     suspend fun countPresent(): Int = comicDao.countPresent()
 
     /**
@@ -167,6 +169,9 @@ class ComicRepository(
     fun observeShelfCovers(): Flow<Map<String, Long>> =
         shelfCoverDao.observeAll().map { list -> list.associate { it.key to it.comicId } }
 
+    /** 全量自定义封面记录 —— 导出备份时用。 */
+    suspend fun getShelfCovers(): List<ShelfCoverEntity> = shelfCoverDao.getAll()
+
     suspend fun setShelfCover(key: String, comicId: Long) =
         shelfCoverDao.put(ShelfCoverEntity(key, comicId))
 
@@ -242,8 +247,64 @@ class ComicRepository(
         folderUri: String?,
         size: Long,
         modifiedTime: Long,
-        fileName: String
-    ) = comicDao.relocate(id, uri, folderUri, size, modifiedTime, fileName)
+        fileName: String,
+        format: String,
+        pageCount: Int
+    ) = comicDao.relocate(id, uri, folderUri, size, modifiedTime, fileName, format, pageCount)
+
+    /**
+     * 把一条「文件找不到」的占位记录并进在库记录，然后删掉占位记录。
+     *
+     * 修复的是「先恢复备份、后授权扫描」留下的重复：历史数据（标签、进度、
+     * 收藏、阅读会话、自定义封面）全在占位那条上，而在库那条是扫描新建的，
+     * 除了文件位置什么都没有。所以除了位置信息，其余一律以占位记录为准。
+     *
+     * 幂等：占位记录已经被合并过时，[comicDao.getById] 会直接返回 null。
+     */
+    suspend fun absorbMissing(presentId: Long, shellId: Long) {
+        val present = comicDao.getById(presentId) ?: return
+        val shell = comicDao.getById(shellId) ?: return
+        if (present.id == shell.id || !shell.missing) return
+
+        // 进度取「读得更晚的那一次」—— 在库那条也可能已经被用户翻过几页
+        val shellIsNewer = shell.lastReadTime >= present.lastReadTime
+        comicDao.upsert(
+            present.copy(
+                favorite = present.favorite || shell.favorite,
+                progress = if (shellIsNewer) shell.progress else present.progress,
+                currentPage = if (shellIsNewer) shell.currentPage else present.currentPage,
+                lastReadTime = maxOf(present.lastReadTime, shell.lastReadTime),
+                // 阅读偏好 / 扩展元数据：在库那条为空就用占位记录里的
+                readMode = present.readMode ?: shell.readMode,
+                readDirection = present.readDirection ?: shell.readDirection,
+                fitMode = present.fitMode ?: shell.fitMode,
+                zoom = present.zoom ?: shell.zoom,
+                series = present.series ?: shell.series,
+                volume = present.volume ?: shell.volume,
+                note = present.note ?: shell.note,
+                rating = present.rating ?: shell.rating,
+                // 「用户手动改过」这个事实要合并，不能因为换了条记录就丢掉
+                manualTitle = present.manualTitle || shell.manualTitle,
+                manualAuthor = present.manualAuthor || shell.manualAuthor,
+                addedTime = minOf(present.addedTime, shell.addedTime)
+            )
+        )
+
+        // 标签关系搬过去。attachAll 是 INSERT OR IGNORE，重复的自动跳过 ——
+        // 在库那条本来就挂着同一个标签时也不会冲突。
+        val relations = tagDao.relationsOf(listOf(shell.id))
+        if (relations.isNotEmpty()) {
+            tagDao.attachAll(relations.map { ComicTagEntity(presentId, it.tagId, it.createdAt) })
+        }
+        tagDao.detachAllFromComics(listOf(shell.id))
+
+        // 阅读会话与「拿这本当文件夹封面」的指定都得跟着走，
+        // 否则「合并重复」会顺手把用户的阅读统计和封面设置删掉
+        statsDao.reassignComic(shell.id, presentId)
+        shelfCoverDao.reassignComic(shell.id, presentId)
+
+        comicDao.deleteById(shell.id)
+    }
 
     suspend fun setFingerprint(id: Long, fingerprint: String, sampleHash: String) =
         comicDao.setFingerprint(id, fingerprint, sampleHash)
@@ -259,15 +320,26 @@ class ComicRepository(
     suspend fun findByUri(uri: String): ComicEntity? = comicDao.findByUri(uri)
     suspend fun findByFingerprint(fingerprint: String): ComicEntity? =
         comicDao.findByFingerprint(fingerprint).singleOrNull()
-    suspend fun findBySampleHash(hash: String): ComicEntity? =
-        comicDao.findBySampleHash(hash).singleOrNull()
-    suspend fun findLegacyBySizeAndPages(size: Long, pageCount: Int): ComicEntity? =
-        comicDao.findLegacyBySizeAndPages(size, pageCount).singleOrNull()
-    suspend fun findBySampleHashOrNull(hash: String): List<ComicEntity> = comicDao.findBySampleHash(hash)
+
+    /** 按内容特征挑一条最该被接回来的记录（失效记录优先）。 */
+    suspend fun findSampleHashCandidate(hash: String): ComicEntity? =
+        comicDao.findSampleHashCandidate(hash)
+
+    /** 老数据没有 sampleHash 时的退化匹配（大小 + 页数，失效记录优先）。 */
+    suspend fun findLegacyCandidate(size: Long, pageCount: Int): ComicEntity? =
+        comicDao.findLegacyCandidate(size, pageCount)
 
     suspend fun upsert(comic: ComicEntity): Long = comicDao.upsert(comic)
     suspend fun upsertAll(comics: List<ComicEntity>): List<Long> = comicDao.upsertAll(comics)
+
+    /**
+     * 清空整个库（覆盖恢复用）。
+     *
+     * **`comic_tags` 必须一起清** —— 它没有外键，删 comics / tags 都不会带走它。
+     * 旧实现漏了这一步，覆盖恢复后库里会留一批指向已删 id 的孤儿关系。
+     */
     suspend fun clearAll() {
+        tagDao.clearRelations()
         tagDao.clearAll()
         statsDao.clearAll()
         shelfCoverDao.clearAll()

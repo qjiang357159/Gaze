@@ -1078,6 +1078,8 @@ private fun SearchRow(
     onFocusChange: (Boolean) -> Unit = {}
 ) {
     val colors = gazeColors
+    var showHelp by remember { mutableStateOf(false) }
+
     TextField(
         value = query,
         onValueChange = onQueryChange,
@@ -1092,9 +1094,29 @@ private fun SearchRow(
             Icon(Icons.Default.Search, contentDescription = null, tint = colors.inkFaint)
         },
         trailingIcon = {
-            if (query.isNotEmpty()) {
-                IconButton(onClick = { onQueryChange("") }) {
-                    Icon(Icons.Default.Close, contentDescription = "清空", tint = colors.inkFaint)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (query.isNotEmpty()) {
+                    IconButton(onClick = { onQueryChange("") }, modifier = Modifier.size(40.dp)) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "清空",
+                            tint = colors.inkFaint,
+                            modifier = Modifier.size(19.dp)
+                        )
+                    }
+                }
+                // 多要素搜索的说明入口。
+                //
+                // 放在搜索框**里面**、而不是做成一条常驻提示：空格分词这件事
+                // 大多数时候用户不需要知道，只有「搜出来是空的」时才会想找答案 ——
+                // 那时候他的手就在搜索框上。
+                IconButton(onClick = { showHelp = true }, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        GazeIcons.Help,
+                        contentDescription = "搜索说明",
+                        tint = colors.inkFaint,
+                        modifier = Modifier.size(19.dp)
+                    )
                 }
             }
         },
@@ -1109,6 +1131,44 @@ private fun SearchRow(
         ),
         textStyle = MaterialTheme.typography.bodyMedium
     )
+
+    if (showHelp) {
+        AlertDialog(
+            onDismissRequest = { showHelp = false },
+            title = { Text("多要素搜索", style = MaterialTheme.typography.titleLarge) },
+            text = {
+                Column {
+                    Text(
+                        "搜索会同时看标题、作者、标签和文件名，命中任意一处就算找到。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "想同时按多个要素找，用空格把它们分开。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "比如输入「恋爱 完结」，只有同时满足这两条的漫画才会出现；" +
+                            "输入「某个标签 作者名」也一样 —— 空格越多，范围越窄。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.inkFaint
+                    )
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        "想找某个标签下的全部漫画，直接输入标签名即可。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.inkFaint
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showHelp = false }) { Text("知道了") }
+            }
+        )
+    }
 }
 
 @Composable
