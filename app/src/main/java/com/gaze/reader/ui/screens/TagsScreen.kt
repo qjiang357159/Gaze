@@ -79,6 +79,7 @@ import com.gaze.reader.ui.components.TagColorPicker
 import com.gaze.reader.ui.components.ThinProgress
 import com.gaze.reader.ui.components.combinedClickableCompat
 import com.gaze.reader.ui.theme.gazeColors
+import kotlin.math.roundToInt
 
 /**
  * 标签页。
@@ -126,8 +127,10 @@ fun TagsScreen(
     // 拖动期间用本地顺序渲染（让其他卡片实时让位），松手提交后再交还给数据源。
     var localIds by remember { mutableStateOf<List<Long>?>(null) }
     val display = remember(tags, localIds) {
-        val ids = localIds
-        if (ids == null) tags else ids.mapNotNull { id -> tags.firstOrNull { it.id == id } }
+        val ids = localIds ?: return@remember tags
+        // 拖动时这段每帧都要跑一次，用索引而不是对每个 id 扫一遍列表。
+        val byId = tags.associateBy { it.id }
+        ids.mapNotNull { byId[it] }
     }
 
     // 提交后数据库回流要一两帧。顺序对上了才把控制权交还，
@@ -192,6 +195,25 @@ fun TagsScreen(
                     if (selectionMode) Modifier
                     else Modifier.pointerInput(tags) {
                         val slop = viewConfiguration.touchSlop
+                        val gapPx = TAG_GRID_GAP.toPx()
+                        // 手指在容器坐标里的当前位置，以及「手指相对卡片中心的偏移」。
+                        //
+                        // 刻意**不**用「被拖卡片的位置 + dragOffset」反推它：卡片一换格子，
+                        // 那个位置就跟着变，反推出来的坐标会自己漂 —— 而下面的判定
+                        // 只要跟着漂，就会漂出「换过去又换回来」的死循环。
+                        var pointerPos = Offset.Zero
+                        var grabOffset = Offset.Zero
+
+                        // 格子网：拖动开始时量一次，整个拖动期间都用这一份。
+                        //
+                        // 不实时读 `layoutInfo` 是有原因的：让位动画进行中时，读到的
+                        // 位置处在「旧格子和新格子之间」，拿它当基准算出来的目标格
+                        // 会跟着动画一起抖。量一次之后，基准就固定了。
+                        var anchorIndex = 0
+                        var anchorCenter = Offset.Zero
+                        var stepX = 0f
+                        var stepY = 0f
+
                         detectDragGesturesAfterLongPress(
                             onDragStart = { position ->
                                 val hit = gridState.layoutInfo.visibleItemsInfo
@@ -203,6 +225,19 @@ fun TagsScreen(
                                     }
                                 val id = hit?.key as? Long
                                     ?: return@detectDragGesturesAfterLongPress
+                                pointerPos = position
+                                // 记下抓在哪：抓左边缘和抓正中间，换位时机不该差半张卡。
+                                grabOffset = position - Offset(
+                                    hit.offset.x + hit.size.width / 2f,
+                                    hit.offset.y + hit.size.height / 2f
+                                )
+                                anchorIndex = hit.index
+                                anchorCenter = Offset(
+                                    hit.offset.x + hit.size.width / 2f,
+                                    hit.offset.y + hit.size.height / 2f
+                                )
+                                stepX = hit.size.width + gapPx
+                                stepY = hit.size.height + gapPx
                                 draggingId = id
                                 localIds = tags.map { it.id }
                                 dragOffset = Offset.Zero
@@ -215,6 +250,7 @@ fun TagsScreen(
                                 val id = draggingId
                                     ?: return@detectDragGesturesAfterLongPress
                                 change.consume()
+                                pointerPos += delta
                                 dragOffset += delta
                                 if (!movedEnough) {
                                     // 长按之后几乎没挪 = 用户要的是批量管理，不是排序。
@@ -224,37 +260,46 @@ fun TagsScreen(
                                     }
                                     movedEnough = true
                                 }
+                                if (stepX <= 0f || stepY <= 0f) {
+                                    return@detectDragGesturesAfterLongPress
+                                }
 
-                                val info = gridState.layoutInfo
-                                val self = info.visibleItemsInfo
-                                    .firstOrNull { it.key == id }
-                                    ?: return@detectDragGesturesAfterLongPress
-                                val centerX = self.offset.x + self.size.width / 2f + dragOffset.x
-                                val centerY = self.offset.y + self.size.height / 2f + dragOffset.y
-                                // 卡片中心离谁最近，就该换到谁的位置上
-                                val target = info.visibleItemsInfo
-                                    .filter { it.key != id }
-                                    .minByOrNull { other ->
-                                        val dx = other.offset.x + other.size.width / 2f - centerX
-                                        val dy = other.offset.y + other.size.height / 2f - centerY
-                                        dx * dx + dy * dy
-                                    }
-                                    ?: return@detectDragGesturesAfterLongPress
+                                // 目标格 = 被拖卡片的中心落在哪一格。
+                                //
+                                // 早先这里是「离哪张卡片最近就换给谁」，在两张卡之间
+                                // 来回蹭的时候会失控地闪：换位之后被让出来的那张正好停在
+                                // 手指底下，成了「最近的那一个」，于是下一次事件又换回去，
+                                // 一帧一个来回。
+                                //
+                                // 现在改成先算出一张**固定的格子网**，再问「中心落在网眼哪一格」。
+                                // 这张网只由「列数 / 卡片尺寸 / 间距」决定，跟当前排列顺序
+                                // 无关 —— 换算结果不会因为刚才换过一次位而变，反馈回路
+                                // 从源头上被切断了。
+                                val center = pointerPos - grabOffset
+                                // 列要夹回 0..列数-1：往右边拖出网格时，横向多出来的
+                                // 那一截不该被算成「又往后跳一格」。
+                                val col = (anchorIndex % TAG_GRID_COLUMNS +
+                                    ((center.x - anchorCenter.x) / stepX).roundToInt())
+                                    .coerceIn(0, TAG_GRID_COLUMNS - 1)
+                                val row = anchorIndex / TAG_GRID_COLUMNS +
+                                    ((center.y - anchorCenter.y) / stepY).roundToInt()
 
                                 val ids = localIds
                                     ?: return@detectDragGesturesAfterLongPress
+                                if (ids.isEmpty()) return@detectDragGesturesAfterLongPress
                                 val from = ids.indexOf(id)
-                                val to = target.index
-                                if (from < 0 || to < 0 || from == to) {
-                                    return@detectDragGesturesAfterLongPress
-                                }
+                                if (from < 0) return@detectDragGesturesAfterLongPress
+                                val to = (row * TAG_GRID_COLUMNS + col)
+                                    .coerceIn(0, ids.lastIndex)
+                                if (from == to) return@detectDragGesturesAfterLongPress
 
                                 localIds = ids.toMutableList().apply { add(to, removeAt(from)) }
                                 // 让位之后被拖的卡片会「落」进目标格子，
                                 // 把这段位移从累积量里减掉，卡片才会稳稳停在手指下。
+                                // 用格子步长算而不是读布局：此刻布局还是换位前的。
                                 dragOffset -= Offset(
-                                    (target.offset.x - self.offset.x).toFloat(),
-                                    (target.offset.y - self.offset.y).toFloat()
+                                    (to % TAG_GRID_COLUMNS - from % TAG_GRID_COLUMNS) * stepX,
+                                    (to / TAG_GRID_COLUMNS - from / TAG_GRID_COLUMNS) * stepY
                                 )
                             },
                             onDragEnd = {
@@ -292,12 +337,12 @@ fun TagsScreen(
             } else {
                 LazyVerticalGrid(
                     state = gridState,
-                    columns = GridCells.Fixed(2),
+                    columns = GridCells.Fixed(TAG_GRID_COLUMNS),
                     contentPadding = PaddingValues(
                         start = 20.dp, end = 20.dp, top = 14.dp, bottom = 96.dp
                     ),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(TAG_GRID_GAP),
+                    verticalArrangement = Arrangement.spacedBy(TAG_GRID_GAP),
                     modifier = Modifier.fillMaxSize()
                 ) {
                     items(display, key = { it.id }) { tag ->
@@ -428,6 +473,17 @@ fun TagsScreen(
 
 /** 卡片高度固定：两列网格只要有一格高一点，整面墙的节奏就乱了。 */
 private val TAG_CARD_HEIGHT = 68.dp
+
+/**
+ * 网格间距。
+ *
+ * 抽成常量是因为**拖动排序的格子换算也要用它** —— 那套换算假定格子是等距的，
+ * 一旦这里改了而换算处还写着字面量，拖到后半屏就会偏半个格子。
+ */
+private val TAG_GRID_GAP = 10.dp
+
+/** 列数。拖动换算要靠它把「第几列」折回合法范围，和上面的间距同理。 */
+private const val TAG_GRID_COLUMNS = 2
 
 /**
  * 标签页顶部的「收藏」入口。

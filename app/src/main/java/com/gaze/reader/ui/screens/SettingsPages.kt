@@ -1442,6 +1442,13 @@ private data class ReleaseNote(val version: String, val items: List<String>)
  */
 private val CHANGELOG = listOf(
     ReleaseNote(
+        version = "1.7.2",
+        items = listOf(
+            "修复长按拖动标签排序时，拖到两个标签的交界处会疯狂闪动、失控",
+            "拖动排序改为按格子定位，抓在卡片边缘和抓在中间换位时机一致"
+        )
+    ),
+    ReleaseNote(
         version = "1.7.1",
         items = listOf(
             "修复「先恢复备份、再授权扫描」时标签与阅读进度丢失 —— 扫描现在会把备份留下的记录直接接回文件，而不是另建一条新的",
