@@ -9,6 +9,7 @@ import com.gaze.reader.data.repository.FolderRepository
 import com.gaze.reader.data.repository.StatsRepository
 import com.gaze.reader.data.repository.TagRepository
 import com.gaze.reader.image.CoverStore
+import com.gaze.reader.scan.CoverEditor
 import com.gaze.reader.scan.CoverGenerator
 import com.gaze.reader.scan.LibraryHealthChecker
 import com.gaze.reader.scan.LibraryScanner
@@ -64,6 +65,11 @@ class AppContainer(context: Context) {
 
     val coverGenerator: CoverGenerator by lazy {
         CoverGenerator(appContext, comicRepository, coverStore)
+    }
+
+    /** 换封面：从漫画里选一页，或从本地挑一张图。 */
+    val coverEditor: CoverEditor by lazy {
+        CoverEditor(appContext, comicRepository, coverStore)
     }
 
     /** 文件健康检查：逐个打开归档，找出打不开或页数异常的漫画。 */

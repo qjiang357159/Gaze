@@ -66,6 +66,15 @@ data class GazeSettings(
     val brightness: Float = 0.5f,
     /** 音量键翻页。 */
     val volumeKeyPaging: Boolean = false,
+    /**
+     * 点击翻页。
+     *
+     * 开着时：左侧三分之一上一页、右侧三分之一下一页、中间那条切换控件栏。
+     * 关掉后单击只剩「切换控件栏」—— 有人就是只想点一下看菜单。
+     *
+     * 默认**开**：单页模式下这是最省事的前进方式，比在屏幕上划一下更轻。
+     */
+    val tapToPage: Boolean = true,
 
     // ---------------------------------------------------------- 文件名解析
     /**
@@ -119,6 +128,7 @@ class SettingsRepository(private val context: Context) {
         val BRIGHTNESS_FOLLOW = booleanPreferencesKey("brightness_follow_system")
         val BRIGHTNESS = floatPreferencesKey("brightness")
         val VOLUME_KEY_PAGING = booleanPreferencesKey("volume_key_paging")
+        val TAP_TO_PAGE = booleanPreferencesKey("tap_to_page")
         val PARSE_AUTHOR = booleanPreferencesKey("parse_author_from_filename")
         val AUTHOR_SEPARATOR = stringPreferencesKey("author_separator")
         val PARSE_AUTHOR_BRACKET = booleanPreferencesKey("parse_author_by_bracket")
@@ -154,6 +164,7 @@ class SettingsRepository(private val context: Context) {
             brightnessFollowSystem = p[Keys.BRIGHTNESS_FOLLOW] ?: true,
             brightness = p[Keys.BRIGHTNESS] ?: 0.5f,
             volumeKeyPaging = p[Keys.VOLUME_KEY_PAGING] ?: false,
+            tapToPage = p[Keys.TAP_TO_PAGE] ?: true,
             parseAuthorBySeparator = p[Keys.PARSE_AUTHOR] ?: true,
             authorSeparator = p[Keys.AUTHOR_SEPARATOR]
                 ?: FileNameParser.DEFAULT_SEPARATOR,
@@ -216,6 +227,10 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setVolumeKeyPaging(value: Boolean) {
         context.gazeDataStore.edit { it[Keys.VOLUME_KEY_PAGING] = value }
+    }
+
+    suspend fun setTapToPage(value: Boolean) {
+        context.gazeDataStore.edit { it[Keys.TAP_TO_PAGE] = value }
     }
 
     suspend fun setParseAuthorBySeparator(value: Boolean) {

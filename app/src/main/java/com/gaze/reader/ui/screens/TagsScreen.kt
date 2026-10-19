@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -62,6 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.gaze.reader.core.Formatters
+import com.gaze.reader.core.LibraryLayout
 import com.gaze.reader.core.SortOrder
 import com.gaze.reader.data.db.ComicEntity
 import com.gaze.reader.data.db.TagEntity
@@ -988,6 +990,8 @@ fun FavoritesScreen(
 fun TagDetailScreen(
     tag: TagEntity?,
     comics: List<ComicEntity>,
+    /** 跟随书架的排版：网格 2/3 列、列表小/大封面，同一个设置管到底。 */
+    layout: LibraryLayout,
     sort: SortOrder,
     onSortChange: (SortOrder) -> Unit,
     onBack: () -> Unit,
@@ -997,6 +1001,7 @@ fun TagDetailScreen(
     val colors = gazeColors
     var sortMenu by remember { mutableStateOf(false) }
     val gridState = rememberLazyGridState()
+    val listState = rememberLazyListState()
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -1054,51 +1059,29 @@ fun TagDetailScreen(
             )
         } else {
             Box(Modifier.weight(1f)) {
-                LazyVerticalGrid(
-                    state = gridState,
-                    columns = GridCells.Adaptive(minSize = 104.dp),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 96.dp),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(18.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    items(comics, key = { it.id }) { comic ->
-                        Column(Modifier.fillMaxWidth()) {
-                            Box(Modifier.fillMaxWidth().clickable { onOpenComic(comic.id) }) {
-                                ComicCover(
-                                    coverPath = comic.coverPath,
-                                    title = comic.title,
-                                    modifier = Modifier.fillMaxWidth().aspectRatio(0.7f)
-                                )
-                            }
-                            Spacer(Modifier.height(7.dp))
-                            Text(
-                                text = comic.title,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onBackground,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Spacer(Modifier.height(5.dp))
-                            ThinProgress(progress = comic.progress)
-                            Spacer(Modifier.height(6.dp))
-                            Text(
-                                text = "移除此标签",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.inkFaint,
-                                modifier = Modifier.clickable { onRemoveFromTag(comic.id) }
-                            )
-                        }
-                    }
+                // 与书架共用同一套渲染：排版跟着书架的设置走，
+                // 卡片样式也只有一份，改一处两边同时生效。
+                ComicCollection(
+                    comics = comics,
+                    layout = layout,
+                    selected = emptySet(),
+                    selectionMode = false,
+                    gridState = gridState,
+                    listState = listState,
+                    onOpen = onOpenComic,
+                    onToggleSelect = {},
+                    onRemoveFromTag = onRemoveFromTag
+                )
+                // 两种滚动容器的状态类型不同，重载必须显式分开写 ——
+                // `if (...) gridState else listState` 的公共类型是 Any，选不到重载。
+                val topButtonModifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 20.dp, bottom = 20.dp)
+                if (layout.isGrid) {
+                    BackToTopButton(state = gridState, modifier = topButtonModifier)
+                } else {
+                    BackToTopButton(state = listState, modifier = topButtonModifier)
                 }
-                LazyGridScrollbar(
-                    state = gridState,
-                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 2.dp)
-                )
-                BackToTopButton(
-                    state = gridState,
-                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 20.dp, bottom = 20.dp)
-                )
             }
         }
     }

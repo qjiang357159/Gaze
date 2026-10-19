@@ -50,6 +50,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.gaze.reader.core.LibraryLayout
 import com.gaze.reader.core.SortOrder
 import com.gaze.reader.data.AppContainer
 import com.gaze.reader.data.db.ShelfGroup
@@ -62,6 +63,7 @@ import com.gaze.reader.ui.components.TagPickMode
 import com.gaze.reader.ui.screens.AboutSettingsScreen
 import com.gaze.reader.ui.screens.AppearanceSettingsScreen
 import com.gaze.reader.ui.screens.BackupSettingsScreen
+import com.gaze.reader.ui.screens.CoverActions
 import com.gaze.reader.ui.screens.DetailScreen
 import com.gaze.reader.ui.screens.DetailViewModel
 import com.gaze.reader.ui.screens.FavoritesScreen
@@ -264,7 +266,13 @@ fun GazeRoot(
                 ScreenInsets { DetailRoute(container = container, navController = navController) }
             }
             composable(Routes.TAG_DETAIL) {
-                ScreenInsets { TagDetailRoute(container = container, navController = navController) }
+                ScreenInsets {
+                    TagDetailRoute(
+                        container = container,
+                        navController = navController,
+                        layout = settings.libraryLayout
+                    )
+                }
             }
             // 阅读页是沉浸式：自己铺满整屏，不给状态栏留位 —— 唯一不加外壳的目的地。
             composable(Routes.READER) {
@@ -627,6 +635,7 @@ private fun SettingsReadingRoute(viewModel: SettingsViewModel, navController: Na
         onSetBrightnessFollowSystem = viewModel::setBrightnessFollowSystem,
         onSetBrightness = viewModel::setBrightness,
         onSetVolumeKeyPaging = viewModel::setVolumeKeyPaging,
+        onSetTapToPage = viewModel::setTapToPage,
         onSetKeepScreenOn = viewModel::setKeepScreenOn,
         onSetShowPageNumber = viewModel::setShowPageNumber,
         onSetReaderBackground = viewModel::setReaderBackground,
@@ -773,7 +782,11 @@ private fun HistoryRoute(container: AppContainer, navController: NavController) 
 }
 
 @Composable
-private fun TagDetailRoute(container: AppContainer, navController: NavController) {
+private fun TagDetailRoute(
+    container: AppContainer,
+    navController: NavController,
+    layout: LibraryLayout
+) {
     val viewModel: TagDetailViewModel = viewModel(factory = AppViewModelProvider.Factory)
     val tag by viewModel.tag.collectAsStateWithLifecycle()
     val comics by viewModel.comics.collectAsStateWithLifecycle()
@@ -782,6 +795,7 @@ private fun TagDetailRoute(container: AppContainer, navController: NavController
     TagDetailScreen(
         tag = tag,
         comics = comics,
+        layout = layout,
         sort = sort,
         onSortChange = {
             sort = it
@@ -801,6 +815,7 @@ private fun DetailRoute(container: AppContainer, navController: NavController) {
     val allTags by viewModel.allTags.collectAsStateWithLifecycle()
     val message by viewModel.message.collectAsStateWithLifecycle()
     val removed by viewModel.removed.collectAsStateWithLifecycle()
+    val coverPickerOpen by viewModel.coverPickerOpen.collectAsStateWithLifecycle()
 
     DetailScreen(
         comic = comic,
@@ -808,6 +823,17 @@ private fun DetailRoute(container: AppContainer, navController: NavController) {
         allTags = allTags,
         message = message,
         removed = removed,
+        cover = remember(viewModel) {
+            CoverActions(
+                open = viewModel::openCoverPicker,
+                close = viewModel::closeCoverPicker,
+                thumb = { page -> viewModel.coverThumb(page) },
+                pickPage = viewModel::applyCoverFromPage,
+                pickImage = viewModel::applyCoverFromImage,
+                regenerate = viewModel::regenerateCover
+            )
+        },
+        coverPickerOpen = coverPickerOpen,
         onBack = { navController.popBackStack() },
         onRead = { comic?.let { navController.navigate(Routes.reader(it.id)) } },
         onToggleFavorite = viewModel::toggleFavorite,
@@ -815,7 +841,6 @@ private fun DetailRoute(container: AppContainer, navController: NavController) {
         onCreateTag = viewModel::createAndAttach,
         onRename = viewModel::rename,
         onSetMetadata = viewModel::setMetadata,
-        onRegenerateCover = viewModel::regenerateCover,
         // 移除后**不立刻返回**：留 5 秒撤销窗口，倒计时结束由 DetailScreen 自己回退
         onRemove = viewModel::remove,
         onUndoRemove = viewModel::undoRemove,
@@ -846,6 +871,7 @@ private fun ReaderRoute(container: AppContainer, navController: NavController) {
         onSetKeepScreenOn = viewModel::setKeepScreenOn,
         onSetShowPageNumber = viewModel::setShowPageNumber,
         onSetVolumeKeyPaging = viewModel::setVolumeKeyPaging,
+        onSetTapToPage = viewModel::setTapToPage,
         onSetReaderBackground = viewModel::setReaderBackground,
         onFollowDefault = viewModel::followGlobalDefaults,
         onOpenDetail = {

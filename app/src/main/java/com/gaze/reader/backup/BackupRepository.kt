@@ -215,6 +215,7 @@ class BackupRepository(
             put("brightnessFollowSystem", current.brightnessFollowSystem)
             put("brightness", current.brightness.toDouble())
             put("volumeKeyPaging", current.volumeKeyPaging)
+            put("tapToPage", current.tapToPage)
             put("keepScreenOn", current.keepScreenOn)
             put("showPageNumber", current.showPageNumber)
             // JSON 键沿用旧名，老备份读进来仍能对上；语义即「按分隔符解析」。
@@ -575,6 +576,7 @@ class BackupRepository(
             settings.setBrightness(json.optDouble("brightness", 0.5).toFloat())
         }
         if (json.has("volumeKeyPaging")) settings.setVolumeKeyPaging(json.optBoolean("volumeKeyPaging"))
+        if (json.has("tapToPage")) settings.setTapToPage(json.optBoolean("tapToPage"))
         if (json.has("keepScreenOn")) settings.setKeepScreenOn(json.optBoolean("keepScreenOn"))
         if (json.has("showPageNumber")) settings.setShowPageNumber(json.optBoolean("showPageNumber"))
         if (json.has("parseAuthorFromFileName")) {

@@ -52,6 +52,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -59,6 +60,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
 import com.gaze.reader.ui.theme.gazeColors
 import java.io.File
 import kotlin.math.roundToInt
@@ -176,8 +178,17 @@ fun ComicCover(
             .border(1.dp, colors.hairline, shape)
     ) {
         if (!coverPath.isNullOrBlank() && File(coverPath).exists()) {
+            val file = File(coverPath)
+            // 换封面是**覆盖同一个文件**（`covers/<id>.jpg`），路径永远不变。
+            // 缓存键必须带上修改时间，否则 Coil 会一直拿内存里那张旧图 ——
+            // 用户点了「更换封面」却看不出任何变化。
+            val context = LocalContext.current
             AsyncImage(
-                model = File(coverPath),
+                model = ImageRequest.Builder(context)
+                    .data(file)
+                    .memoryCacheKey("${file.absolutePath}:${file.lastModified()}")
+                    .diskCacheKey("${file.absolutePath}:${file.lastModified()}")
+                    .build(),
                 contentDescription = title,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()

@@ -7,6 +7,9 @@ import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.view.WindowManager
+import androidx.compose.animation.core.AnimationSpec
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -115,6 +118,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * 阅读页向 ViewModel 取图的三个入口。
@@ -194,6 +198,29 @@ private data class PageGeometry(
     val baseScale: Float
 )
 
+/**
+ * 单击落在画面的哪一条。
+ *
+ * 分三份而不是两份：中间那条留给「切换控件栏」——
+ * 全屏阅读时想调设置，总不能去点某个角落。
+ *
+ * 名字用 PREV/NEXT 而不是 LEFT/RIGHT：横向模式下是左右三分之一，
+ * 纵向连续模式下是上下三分之一，同一套语义两种方向都说得通。
+ */
+private enum class TapZone { PREV, CENTER, NEXT }
+
+/**
+ * 点击翻页的动画曲线。
+ *
+ * 时长刻意压短：翻页是高频动作，动画一长就从「顺畅」变成「拖沓」。
+ * 但也不能没有 —— 瞬移看着生硬，眼睛接不上前后两页的关系。
+ * 220ms + FastOutSlowIn（起手快、收尾稳）是滑动翻页的常用区间。
+ */
+private val TapPageAnimation: AnimationSpec<Float> = tween(
+    durationMillis = 220,
+    easing = FastOutSlowInEasing
+)
+
 private const val MAX_ZOOM = 6f
 
 /** 区域外扩比例：平移一点点不用重新解码。 */
@@ -226,6 +253,7 @@ fun ReaderScreen(
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetShowPageNumber: (Boolean) -> Unit,
     onSetVolumeKeyPaging: (Boolean) -> Unit,
+    onSetTapToPage: (Boolean) -> Unit,
     onSetReaderBackground: (ReaderBackground) -> Unit,
     onFollowDefault: () -> Unit,
     onOpenDetail: () -> Unit,
@@ -403,6 +431,7 @@ fun ReaderScreen(
                     onSetKeepScreenOn = onSetKeepScreenOn,
                     onSetShowPageNumber = onSetShowPageNumber,
                     onSetVolumeKeyPaging = onSetVolumeKeyPaging,
+                    onSetTapToPage = onSetTapToPage,
                     onSetReaderBackground = onSetReaderBackground,
                     onFollowDefault = onFollowDefault,
                     onOpenDetail = onOpenDetail
@@ -483,7 +512,39 @@ private fun SinglePagePager(
             page = page,
             loader = loader,
             fitMode = state.fitMode,
-            onTap = onToggleControls,
+            tapPaging = state.tapToPage,
+            onTap = { zone ->
+                // 边界上不设死区：已经在第一页/最后一页时，点那一侧仍然是
+                // 「切换控件栏」—— 否则用户会觉得屏幕边缘坏了。
+                //
+                // 抬手立刻起动画（不等双击判定），但走的是短促的缓动滑动，
+                // 不是瞬移 —— 瞬移看着生硬，眼睛接不上前后两页。
+                when (zone) {
+                    TapZone.PREV -> if (pagerState.currentPage > 0) {
+                        scope.launch {
+                            pagerState.animateScrollToPage(
+                                pagerState.currentPage - 1,
+                                animationSpec = TapPageAnimation
+                            )
+                        }
+                    } else {
+                        onToggleControls()
+                    }
+
+                    TapZone.NEXT -> if (pagerState.currentPage < state.pageCount - 1) {
+                        scope.launch {
+                            pagerState.animateScrollToPage(
+                                pagerState.currentPage + 1,
+                                animationSpec = TapPageAnimation
+                            )
+                        }
+                    } else {
+                        onToggleControls()
+                    }
+
+                    TapZone.CENTER -> onToggleControls()
+                }
+            },
             // 这一页坏了不代表整本读不下去，给个直接越过去的出口
             onSkip = {
                 if (page < state.pageCount - 1) {
@@ -537,7 +598,39 @@ private fun DualPagePager(
                         page = pageIndex,
                         loader = loader,
                         fitMode = state.fitMode,
-                        onTap = onToggleControls,
+                        tapPaging = state.tapToPage,
+                        onTap = { zone ->
+                            // 双页模式翻的是「一组」，所以边界看 pagerCount。
+                            // 目标页用 currentPage 而不是 lambda 里的 index：
+                            // 动画还没走完时再点一次，currentPage 已经动了，
+                            // 用 index 会从旧位置重算，看着像「少翻了一页」。
+                            val current = pagerState.currentPage
+                            when (zone) {
+                                TapZone.PREV -> if (current > 0) {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(
+                                            current - 1,
+                                            animationSpec = TapPageAnimation
+                                        )
+                                    }
+                                } else {
+                                    onToggleControls()
+                                }
+
+                                TapZone.NEXT -> if (current < state.pagerCount - 1) {
+                                    scope.launch {
+                                        pagerState.animateScrollToPage(
+                                            current + 1,
+                                            animationSpec = TapPageAnimation
+                                        )
+                                    }
+                                } else {
+                                    onToggleControls()
+                                }
+
+                                TapZone.CENTER -> onToggleControls()
+                            }
+                        },
                         modifier = Modifier.width(slotWidth),
                         onSkip = {
                             if (index < state.pagerCount - 1) {
@@ -588,7 +681,35 @@ private fun VerticalContinuous(
                 index = index,
                 loader = loader,
                 listState = listState,
-                onToggleControls = onToggleControls,
+                tapPaging = state.tapToPage,
+                // 纵向的「翻页」= 滚到上一张/下一张的页首。判据用 firstVisibleItemIndex
+                // 而不是当前 item 的 index —— 一张长图滚到一半时点下方，该去下一张。
+                //
+                // 点上方多一步：本页已经滚了一截（firstVisibleItemScrollOffset > 0）时
+                // 先回到本页页首，再点才去上一张。直接跳到上一张会让人丢失
+                // 「刚才看到哪」的位置感 —— 尤其是条漫一页就有好几屏。
+                onTap = { zone ->
+                    val current = listState.firstVisibleItemIndex
+                    when (zone) {
+                        TapZone.PREV -> when {
+                            listState.firstVisibleItemScrollOffset > 0 ->
+                                scope.launch { listState.animateScrollToItem(current) }
+
+                            current > 0 ->
+                                scope.launch { listState.animateScrollToItem(current - 1) }
+
+                            else -> onToggleControls()
+                        }
+
+                        TapZone.NEXT -> if (current < state.pageCount - 1) {
+                            scope.launch { listState.animateScrollToItem(current + 1) }
+                        } else {
+                            onToggleControls()
+                        }
+
+                        TapZone.CENTER -> onToggleControls()
+                    }
+                },
                 onSkip = {
                     if (index < state.pageCount - 1) {
                         scope.launch { listState.animateScrollToItem(index + 1) }
@@ -615,22 +736,31 @@ private fun VerticalPage(
     index: Int,
     loader: PageLoader,
     listState: LazyListState,
-    onToggleControls: () -> Unit,
+    tapPaging: Boolean,
+    onTap: (TapZone) -> Unit,
     onSkip: () -> Unit
 ) {
     var retry by remember(index) { mutableIntStateOf(0) }
+    val currentOnTap by rememberUpdatedState(onTap)
+    // pointerInput 的 key 里不放 index（放了滑动时列表项一复用就重启检测器），
+    // 所以拿最新值走 updatedState。
+    val currentIndex by rememberUpdatedState(index)
 
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         val density = LocalDensity.current
         val widthPx = constraints.maxWidth
 
-        val size by produceState<PageSize?>(null, index, retry) {
+        // 局部变量刻意不叫 size：pointerInput 的接收者上也有个 size（控件像素尺寸），
+        // 同名局部变量会把它遮住，日后在手势里算位置时很容易踩。
+        val sizeState by produceState<PageSize?>(null, index, retry) {
             value = loader.loadSize(index)
         }
-        val pageSize = size
+        val pageSize = sizeState
 
         if (pageSize == null) {
-            PageBlock(onTap = onToggleControls) { SectionLabel("正在加载…", color = readerColors.faint) }
+            PageBlock(onTap = { currentOnTap(TapZone.CENTER) }) {
+                SectionLabel("正在加载…", color = readerColors.faint)
+            }
             return@BoxWithConstraints
         }
 
@@ -644,7 +774,30 @@ private fun VerticalPage(
             Modifier
                 .fillMaxWidth()
                 .height(with(density) { fullHeightPx.toDp() })
-                .clickable(onClick = onToggleControls)
+                .pointerInput(tapPaging) {
+                    // 纵向模式没有缩放，也就不需要双击 —— 三块区域都可以抬手即响应，
+                    // 一点延迟都没有（这里不注册 onDoubleTap 是关键）。
+                    //
+                    // 分区按**视口**的上中下算，不能按这一页的高度算：
+                    // 条漫一页可能两万像素高，按页高分区等于永远落在「上半屏」。
+                    // pos 是页内坐标，得补上这一页在视口里的偏移才是屏幕位置。
+                    detectTapGestures(onTap = { pos ->
+                        val info = listState.layoutInfo
+                        val viewportH = info.viewportSize.height
+                        val itemTop = info.visibleItemsInfo
+                            .firstOrNull { it.index == currentIndex }?.offset ?: 0
+                        val screenY = pos.y + itemTop
+                        currentOnTap(
+                            when {
+                                !tapPaging -> TapZone.CENTER
+                                viewportH <= 0 -> TapZone.CENTER
+                                screenY < viewportH / 3f -> TapZone.PREV
+                                screenY > viewportH * 2f / 3f -> TapZone.NEXT
+                                else -> TapZone.CENTER
+                            }
+                        )
+                    })
+                }
         ) {
             if (tiled) {
                 TiledPage(
@@ -844,7 +997,8 @@ private fun ZoomablePage(
     page: Int,
     loader: PageLoader,
     fitMode: FitMode,
-    onTap: () -> Unit,
+    tapPaging: Boolean,
+    onTap: (TapZone) -> Unit,
     modifier: Modifier = Modifier,
     onSkip: (() -> Unit)? = null
 ) {
@@ -904,22 +1058,95 @@ private fun ZoomablePage(
                 it.image.height * it.baseScale > viewH + 0.5f
         } ?: false
 
+        // 这两个值**必须走 rememberUpdatedState**，不能塞进 pointerInput 的 key：
+        // scale 在捏合过程中每帧都变，一放进 key，手势检测器就会被反复重启，
+        // 捏到一半直接断掉。用 updatedState 的话，key 保持稳定，读到的又是最新值。
+        val canPage by rememberUpdatedState(tapPaging && scale <= 1.01f && !baseOverflows)
+        val currentOnTap by rememberUpdatedState(onTap)
+
         Box(
             Modifier
                 .fillMaxSize()
-                .pointerInput(page) {
-                    detectTapGestures(
-                        onTap = { onTap() },
-                        onDoubleTap = {
-                            if (scale > 1.05f) {
-                                scale = 1f
-                                offsetX = 0f
-                                offsetY = 0f
-                            } else {
-                                scale = 2.5f
+                .pointerInput(page, viewW) {
+                    // 这里**刻意不用 detectTapGestures**：只要注册了 onDoubleTap，
+                    // onTap 就必须等双击超时（约 300ms）才回调 —— 左右翻页区因此
+                    // 永远「顿一下」。翻页区根本不需要双击，让它白等这一下纯属冤枉。
+                    // 所以自己写循环：左右三分之一抬手即翻，只有中间那条才等双击。
+                    val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
+                    val slop = viewConfiguration.touchSlop
+
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val start = down.position
+                        var moved = false
+                        var multi = false
+                        var consumed = false
+                        var upPos = start
+
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            if (event.changes.count { it.pressed } > 1) multi = true
+                            val change = event.changes.firstOrNull { it.id == down.id }
+                                ?: event.changes.firstOrNull()
+                                ?: break
+                            if (change.isConsumed) consumed = true
+                            if ((change.position - start).getDistance() > slop) moved = true
+                            if (!change.pressed) {
+                                upPos = change.position
+                                break
                             }
                         }
-                    )
+
+                        // 捏合、横滑翻页、画面被拖动了 —— 都不算点击
+                        if (multi || moved || consumed) return@awaitEachGesture
+
+                        val zone = when {
+                            upPos.x < viewW / 3f -> TapZone.PREV
+                            upPos.x > viewW * 2f / 3f -> TapZone.NEXT
+                            else -> TapZone.CENTER
+                        }
+
+                        // 左右翻页区：抬手就翻，一下都不等。
+                        // 放大过、或图本身就比视口大时 canPage 为假 —— 画面处于可拖动
+                        // 状态，点击不该翻页，那会把「想挪一下看细节」变成「翻走了」。
+                        if (canPage && zone != TapZone.CENTER) {
+                            currentOnTap(zone)
+                            return@awaitEachGesture
+                        }
+
+                        // 中间那条（以及放大后不能翻页的时候）：单击切控件栏、双击缩放，
+                        // 这两个只能靠时间窗区分，只好等 —— 但等的是「看菜单」，不是翻页。
+                        val second = withTimeoutOrNull(doubleTapTimeout) {
+                            awaitFirstDown(requireUnconsumed = false)
+                        }
+                        if (second == null) {
+                            currentOnTap(TapZone.CENTER)
+                            return@awaitEachGesture
+                        }
+
+                        // 第二下也可能是「紧接着滑一下」而不是双击 —— 必须走完这一下确认
+                        // 它是轻点，否则「点一下菜单再滑走」会被当成双击放大。
+                        var secondMoved = false
+                        var secondMulti = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            if (event.changes.count { it.pressed } > 1) secondMulti = true
+                            val change = event.changes.firstOrNull { it.id == second.id } ?: break
+                            if ((change.position - second.position).getDistance() > slop) {
+                                secondMoved = true
+                            }
+                            if (!change.pressed) break
+                        }
+                        if (secondMoved || secondMulti) return@awaitEachGesture
+
+                        if (scale > 1.05f) {
+                            scale = 1f
+                            offsetX = 0f
+                            offsetY = 0f
+                        } else {
+                            scale = 2.5f
+                        }
+                    }
                 }
                 .pointerInput(page, viewW, viewH, geometry) {
                     detectPageGestures(
@@ -1171,6 +1398,7 @@ private fun ReaderControls(
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetShowPageNumber: (Boolean) -> Unit,
     onSetVolumeKeyPaging: (Boolean) -> Unit,
+    onSetTapToPage: (Boolean) -> Unit,
     onSetReaderBackground: (ReaderBackground) -> Unit,
     onFollowDefault: () -> Unit,
     onOpenDetail: () -> Unit
@@ -1306,7 +1534,8 @@ private fun ReaderControls(
                     // 详情：跳到详情页看文件信息
                     ControlsIcon(GazeIcons.Detail, "详情", onOpenDetail)
 
-                    // 溢出菜单：屏幕方向 / 亮度 / 渲染模式 / 音量键翻页 / 屏幕常亮 / 显示页码
+                    // 溢出菜单：屏幕方向 / 亮度 / 渲染模式 / 阅读器背景 /
+                    // 点击翻页 / 音量键翻页 / 屏幕常亮 / 显示页码
                     ControlsOverflowMenu(
                         state = state,
                         onSetRenderMode = onSetRenderMode,
@@ -1314,6 +1543,7 @@ private fun ReaderControls(
                         onSetKeepScreenOn = onSetKeepScreenOn,
                         onSetShowPageNumber = onSetShowPageNumber,
                         onSetVolumeKeyPaging = onSetVolumeKeyPaging,
+                        onSetTapToPage = onSetTapToPage,
                         onSetReaderBackground = onSetReaderBackground,
                         onOpenBrightness = { showBrightness = true }
                     )
@@ -1549,6 +1779,7 @@ private fun ControlsOverflowMenu(
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetShowPageNumber: (Boolean) -> Unit,
     onSetVolumeKeyPaging: (Boolean) -> Unit,
+    onSetTapToPage: (Boolean) -> Unit,
     onSetReaderBackground: (ReaderBackground) -> Unit,
     onOpenBrightness: () -> Unit
 ) {
@@ -1583,6 +1814,7 @@ private fun ControlsOverflowMenu(
                     MenuItem("渲染模式 · ${state.renderMode.label}", false) { submenu = Submenu.RENDER }
                     MenuItem("阅读器背景 · ${state.background.label}", false) { submenu = Submenu.BACKGROUND }
                     HorizontalDivider(color = rc.line)
+                    MenuItem("点击翻页", state.tapToPage) { onSetTapToPage(!state.tapToPage) }
                     MenuItem("音量键翻页", state.volumeKeyPaging) { onSetVolumeKeyPaging(!state.volumeKeyPaging) }
                     MenuItem("屏幕常亮", state.keepScreenOn) { onSetKeepScreenOn(!state.keepScreenOn) }
                     MenuItem("显示页码", state.showPageNumber) { onSetShowPageNumber(!state.showPageNumber) }

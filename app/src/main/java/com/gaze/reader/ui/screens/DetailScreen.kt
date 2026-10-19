@@ -1,19 +1,29 @@
 package com.gaze.reader.ui.screens
 
+import android.graphics.Bitmap
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,14 +42,19 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.gaze.reader.core.Formatters
 import com.gaze.reader.data.db.ComicEntity
 import com.gaze.reader.data.db.TagEntity
@@ -60,6 +75,22 @@ import kotlinx.coroutines.launch
 /** 移除后的撤销窗口。 */
 private const val REMOVE_UNDO_MS = 5_000L
 
+/**
+ * 详情页换封面的入口集合。
+ *
+ * 打包成一个对象而不是六七个散着的回调：它们本来就是**同一件事的六个动作**，
+ * 拆开传会让 DetailScreen 的参数表长到读不下去。
+ */
+class CoverActions(
+    /** 打开选页面板。后台开归档，开好了由 [coverPickerOpen] 立起面板。 */
+    val open: () -> Unit,
+    val close: () -> Unit,
+    val thumb: suspend (Int) -> Bitmap?,
+    val pickPage: (Int) -> Unit,
+    val pickImage: (Uri) -> Unit,
+    val regenerate: () -> Unit
+)
+
 @Composable
 fun DetailScreen(
     comic: ComicEntity?,
@@ -67,6 +98,9 @@ fun DetailScreen(
     allTags: List<TagWithCount>,
     message: String?,
     removed: Boolean,
+    cover: CoverActions,
+    /** 选页面板是否可见。状态在 ViewModel 里 —— 打开它要先把归档读出来。 */
+    coverPickerOpen: Boolean,
     onBack: () -> Unit,
     onRead: () -> Unit,
     onToggleFavorite: () -> Unit,
@@ -74,7 +108,6 @@ fun DetailScreen(
     onCreateTag: (String) -> Unit,
     onRename: (String, String) -> Unit,
     onSetMetadata: (String?, Int?, String?) -> Unit,
-    onRegenerateCover: () -> Unit,
     onRemove: () -> Unit,
     onUndoRemove: () -> Unit,
     onConsumeMessage: () -> Unit
@@ -84,6 +117,20 @@ fun DetailScreen(
     var showRename by remember { mutableStateOf(false) }
     var showMetadata by remember { mutableStateOf(false) }
     var confirmRemove by remember { mutableStateOf(false) }
+
+    // 关掉选页面板时一定要把会话放掉：它占着归档通道，不关会一直握着文件。
+    val closeCoverEditor = { cover.close() }
+
+    // 「从本机图片选择」。OpenDocument 而不是 GetContent —— 前者给出的
+    // 是文档 uri，能直接 openInputStream，也不必担心临时授权过期。
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            cover.pickImage(uri)
+            closeCoverEditor()
+        }
+    }
 
     // 移除后给 5 秒反悔窗口，时间到自动退回上一页。
     // 撤销时 removed 变回 false，这个 effect 重启、倒计时自动作废。
@@ -250,7 +297,7 @@ fun DetailScreen(
             Hairline(Modifier.padding(start = 20.dp))
             DetailAction("编辑详细信息", "系列、卷号与备注") { showMetadata = true }
             Hairline(Modifier.padding(start = 20.dp))
-            DetailAction("重新生成封面", null, onRegenerateCover)
+            DetailAction("更换封面", "从漫画里选一页，或用本地图片", onClick = cover.open)
             Hairline(Modifier.padding(start = 20.dp))
             DetailAction("从书架移除", "不会删除原文件", onRemove = { confirmRemove = true })
             Hairline(Modifier.padding(start = 20.dp))
@@ -363,6 +410,23 @@ fun DetailScreen(
         )
     }
 
+    if (coverPickerOpen) {
+        CoverEditorDialog(
+            pageCount = comic.pageCount,
+            thumb = cover.thumb,
+            onPickPage = { page ->
+                cover.pickPage(page)
+                closeCoverEditor()
+            },
+            onPickImage = { imagePicker.launch(arrayOf("image/*")) },
+            onRegenerate = {
+                cover.regenerate()
+                closeCoverEditor()
+            },
+            onDismiss = { closeCoverEditor() }
+        )
+    }
+
     if (confirmRemove) {
         AlertDialog(
             onDismissRequest = { confirmRemove = false },
@@ -386,6 +450,148 @@ fun DetailScreen(
 }
 
 // ==================================================================== 组件
+
+/**
+ * 换封面面板。
+ *
+ * 三条路摆在一起：从漫画里挑一页、从本机挑一张图、退回自动生成。
+ * 选页放在主位（缩略图网格），因为「这页画得好看」是最常见的换封面理由；
+ * 另外两条做成顶部的两个按钮。
+ *
+ * 用自绘 Dialog 而不是 `ModalBottomSheet`：后者容器色取自 Material 主题，
+ * 和阅读页那边遇到过的是同一个坑 —— 主题与页面不同色时会弹出一张突兀的板。
+ */
+@Composable
+private fun CoverEditorDialog(
+    pageCount: Int,
+    thumb: suspend (Int) -> Bitmap?,
+    onPickPage: (Int) -> Unit,
+    onPickImage: () -> Unit,
+    onRegenerate: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val colors = gazeColors
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(top = 14.dp, bottom = 12.dp)
+        ) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 18.dp, end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "更换封面",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(Modifier.weight(1f))
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                OutlineAction("从本机图片选择", onPickImage, Modifier.weight(1f))
+                OutlineAction("恢复自动生成", onRegenerate, Modifier.weight(1f))
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text(
+                text = if (pageCount > 0) "或者从这本漫画里选一页" else "这本书没有可选的页面",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.inkFaint,
+                modifier = Modifier.padding(horizontal = 18.dp)
+            )
+            Spacer(Modifier.height(8.dp))
+
+            if (pageCount > 0) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(4),
+                    contentPadding = PaddingValues(horizontal = 18.dp, vertical = 2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.fillMaxWidth().height(300.dp)
+                ) {
+                    items(pageCount) { page ->
+                        PageThumbCell(
+                            page = page,
+                            thumb = thumb,
+                            onClick = { onPickPage(page) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 选页面板里的一格。缩略图按需解，滚出视野就回收。 */
+@Composable
+private fun PageThumbCell(
+    page: Int,
+    thumb: suspend (Int) -> Bitmap?,
+    onClick: () -> Unit
+) {
+    val colors = gazeColors
+    val bitmap by produceState<Bitmap?>(null, page) { value = thumb(page) }
+
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(0.7f)
+                .clip(RoundedCornerShape(2.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .border(1.dp, colors.hairline, RoundedCornerShape(2.dp))
+                .clickable(onClick = onClick)
+        ) {
+            val bmp = bitmap
+            if (bmp != null) {
+                Image(
+                    bitmap = bmp.asImageBitmap(),
+                    contentDescription = "第 ${page + 1} 页",
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+        }
+        Spacer(Modifier.height(3.dp))
+        Text(
+            text = "${page + 1}",
+            style = MaterialTheme.typography.labelSmall,
+            color = colors.inkFaint
+        )
+    }
+}
+
+@Composable
+private fun OutlineAction(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = gazeColors
+    Box(
+        modifier
+            .clip(RoundedCornerShape(3.dp))
+            .border(1.dp, colors.hairline, RoundedCornerShape(3.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
 
 @Composable
 private fun SectionHeader(text: String) {

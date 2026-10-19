@@ -49,6 +49,8 @@ data class ReaderUiState(
     val brightnessFollowSystem: Boolean = true,
     val brightness: Float = 0.5f,
     val volumeKeyPaging: Boolean = false,
+    /** 点击翻页：左三分之一上一页、右三分之一下一页、中间切换控件栏。 */
+    val tapToPage: Boolean = true,
     val loading: Boolean = true,
     val error: String? = null,
     /** 目录。PDF 恒为空（系统渲染器不暴露大纲），EPUB 从 nav / ncx 里读。 */
@@ -157,7 +159,8 @@ class ReaderViewModel(
                 screenOrientation = settings.screenOrientation,
                 brightnessFollowSystem = settings.brightnessFollowSystem,
                 brightness = settings.brightness,
-                volumeKeyPaging = settings.volumeKeyPaging
+                volumeKeyPaging = settings.volumeKeyPaging,
+                tapToPage = settings.tapToPage
             )
         }
 
@@ -388,6 +391,12 @@ class ReaderViewModel(
         if (value == _state.value.volumeKeyPaging) return
         _state.update { it.copy(volumeKeyPaging = value) }
         viewModelScope.launch { container.settingsRepository.setVolumeKeyPaging(value) }
+    }
+
+    fun setTapToPage(value: Boolean) {
+        if (value == _state.value.tapToPage) return
+        _state.update { it.copy(tapToPage = value) }
+        viewModelScope.launch { container.settingsRepository.setTapToPage(value) }
     }
 
     /**

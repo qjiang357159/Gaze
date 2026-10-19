@@ -1,5 +1,7 @@
 package com.gaze.reader.ui.screens
 
+import android.graphics.Bitmap
+import android.net.Uri
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -7,11 +9,14 @@ import com.gaze.reader.data.AppContainer
 import com.gaze.reader.data.db.ComicEntity
 import com.gaze.reader.data.db.TagEntity
 import com.gaze.reader.data.db.TagWithCount
+import com.gaze.reader.scan.CoverEditor
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class DetailViewModel(
     private val container: AppContainer,
@@ -89,6 +94,69 @@ class DetailViewModel(
         }
     }
 
+    // ------------------------------------------------------------ 换封面
+
+    /**
+     * 选页会话。整个选页面板共用这一个 —— 每滑一屏重开一次归档，
+     * 大压缩包会卡到没法用。
+     */
+    private var coverSession: CoverEditor.Session? = null
+
+    /** 选页面板是否可见。**由 ViewModel 管**，因为打开它要先在后台开归档。 */
+    private val _coverPickerOpen = MutableStateFlow(false)
+    val coverPickerOpen: StateFlow<Boolean> = _coverPickerOpen
+
+    /**
+     * 打开选页面板。
+     *
+     * 开归档是**阻塞 IO**（归档要读中央目录、EPUB 要解析 OPF 清单），
+     * 直接在点击回调里做会让界面卡一下，几千页的大包更明显。
+     * 所以这里在后台开，开好了再把面板立起来。
+     */
+    fun openCoverPicker() {
+        viewModelScope.launch {
+            closeCoverPicker()
+            val current = comic.value ?: return@launch
+            val session = withContext(Dispatchers.IO) {
+                container.coverEditor.openSession(current)
+            }
+            if (session == null) {
+                _message.value = "打不开这个文件，可能已经失效了"
+            } else {
+                coverSession = session
+                _coverPickerOpen.value = true
+            }
+        }
+    }
+
+    fun closeCoverPicker() {
+        coverSession?.close()
+        coverSession = null
+        _coverPickerOpen.value = false
+    }
+
+    /** 取一页的缩略图。会话没开（或已关）时返回 null。 */
+    suspend fun coverThumb(page: Int): Bitmap? = coverSession?.thumb(page)
+
+    fun applyCoverFromPage(page: Int) {
+        val session = coverSession ?: return
+        viewModelScope.launch {
+            _message.value = "正在生成封面…"
+            val path = session.applyPage(page)
+            _message.value = if (path != null) "封面已更新" else "这一页没法用作封面"
+            closeCoverPicker()
+        }
+    }
+
+    fun applyCoverFromImage(uri: Uri) {
+        viewModelScope.launch {
+            _message.value = "正在生成封面…"
+            val path = container.coverEditor.applyImage(comicId, uri)
+            _message.value = if (path != null) "封面已更新" else "这个文件不是图片，封面没有改动"
+            closeCoverPicker()
+        }
+    }
+
     fun markMissing(missing: Boolean) {
         viewModelScope.launch {
             container.comicRepository.setMissing(comicId, missing)
@@ -129,5 +197,11 @@ class DetailViewModel(
 
     fun consumeMessage() {
         _message.value = null
+    }
+
+    /** 选页会话占着归档通道，ViewModel 销毁时必须放掉。 */
+    override fun onCleared() {
+        closeCoverPicker()
+        super.onCleared()
     }
 }

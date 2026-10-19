@@ -705,8 +705,17 @@ private fun GroupCoverDialog(
 
 // ==================================================================== 漫画集合
 
+/**
+ * 漫画集合的网格 / 列表渲染。
+ *
+ * 刻意**不私有**：标签详情页要跟着书架的视图走（同一个排版、同一张卡片），
+ * 复制一份出来的话，以后改卡片样式必然只改到一半。
+ *
+ * [onRemoveFromTag] 是标签详情页专属的额外动作（书架上没有这个概念），
+ * 传 null 时卡片就完全和书架一致。
+ */
 @Composable
-private fun ComicCollection(
+fun ComicCollection(
     comics: List<ComicEntity>,
     layout: LibraryLayout,
     selected: Set<Long>,
@@ -714,7 +723,8 @@ private fun ComicCollection(
     gridState: LazyGridState,
     listState: LazyListState,
     onOpen: (Long) -> Unit,
-    onToggleSelect: (Long) -> Unit
+    onToggleSelect: (Long) -> Unit,
+    onRemoveFromTag: ((Long) -> Unit)? = null
 ) {
     if (layout.isGrid) {
         Box(Modifier.fillMaxSize()) {
@@ -733,7 +743,8 @@ private fun ComicCollection(
                         selected = comic.id in selected,
                         selectionMode = selectionMode,
                         onClick = { if (selectionMode) onToggleSelect(comic.id) else onOpen(comic.id) },
-                        onLongClick = { onToggleSelect(comic.id) }
+                        onLongClick = { onToggleSelect(comic.id) },
+                        onRemoveFromTag = onRemoveFromTag?.let { remove -> { remove(comic.id) } }
                     )
                 }
             }
@@ -757,7 +768,8 @@ private fun ComicCollection(
                         selected = comic.id in selected,
                         selectionMode = selectionMode,
                         onClick = { if (selectionMode) onToggleSelect(comic.id) else onOpen(comic.id) },
-                        onLongClick = { onToggleSelect(comic.id) }
+                        onLongClick = { onToggleSelect(comic.id) },
+                        onRemoveFromTag = onRemoveFromTag?.let { remove -> { remove(comic.id) } }
                     )
                 }
             }
@@ -776,7 +788,8 @@ private fun GridCard(
     selected: Boolean,
     selectionMode: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    onRemoveFromTag: (() -> Unit)? = null
 ) {
     val colors = gazeColors
     Column(
@@ -846,6 +859,15 @@ private fun GridCard(
         } else {
             Box(Modifier.fillMaxWidth().height(2.dp).background(colors.hairline.copy(alpha = 0.4f)))
         }
+        if (onRemoveFromTag != null) {
+            Spacer(Modifier.height(6.dp))
+            Text(
+                text = "移除此标签",
+                style = MaterialTheme.typography.bodySmall,
+                color = colors.inkFaint,
+                modifier = Modifier.clickable(onClick = onRemoveFromTag)
+            )
+        }
     }
 }
 
@@ -856,7 +878,8 @@ private fun ListRow(
     selected: Boolean,
     selectionMode: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit
+    onLongClick: () -> Unit,
+    onRemoveFromTag: (() -> Unit)? = null
 ) {
     val colors = gazeColors
     Column {
@@ -910,6 +933,15 @@ private fun ListRow(
                     contentDescription = "已收藏",
                     tint = colors.accent,
                     modifier = Modifier.size(14.dp)
+                )
+            }
+            if (onRemoveFromTag != null) {
+                Spacer(Modifier.width(12.dp))
+                Text(
+                    text = "移除",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.inkFaint,
+                    modifier = Modifier.clickable(onClick = onRemoveFromTag)
                 )
             }
         }

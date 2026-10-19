@@ -286,6 +286,7 @@ fun ReadingSettingsScreen(
     onSetBrightnessFollowSystem: (Boolean) -> Unit,
     onSetBrightness: (Float) -> Unit,
     onSetVolumeKeyPaging: (Boolean) -> Unit,
+    onSetTapToPage: (Boolean) -> Unit,
     onSetKeepScreenOn: (Boolean) -> Unit,
     onSetShowPageNumber: (Boolean) -> Unit,
     onSetReaderBackground: (ReaderBackground) -> Unit,
@@ -385,6 +386,14 @@ fun ReadingSettingsScreen(
         }
 
         SettingsSection("操作", icon = GazeIcons.VolumeKeys) {
+            ToggleRow(
+                label = "点击翻页",
+                checked = settings.tapToPage,
+                onChange = onSetTapToPage,
+                hint = "横向翻页时点左三分之一上一页、右三分之一下一页；纵向连续模式改成点上方和下方。" +
+                    "中间那条切换控件栏，放大查看时点击也只切换控件栏。"
+            )
+            Hairline(Modifier.padding(start = SettingsRowInset))
             ToggleRow(
                 label = "音量键翻页",
                 checked = settings.volumeKeyPaging,
@@ -1441,6 +1450,16 @@ private data class ReleaseNote(val version: String, val items: List<String>)
  * 更新日志是给人扫的，不是给人读的。
  */
 private val CHANGELOG = listOf(
+    ReleaseNote(
+        version = "1.7.3",
+        items = listOf(
+            "新增点击翻页：横向点左三分之一上一页、右三分之一下一页，纵向连续模式点上方上一张、下方下一张",
+            "中间三分之一切换控件栏；抬手即翻，配短促的缓动滑动（默认开启，可关）",
+            "详情页可以更换封面：从这本漫画里挑一页，或者用本机的图片",
+            "标签详情页的排版改为跟随书架的视图设置，不再固定成一种网格",
+            "更换封面后书架的封面会立刻刷新"
+        )
+    ),
     ReleaseNote(
         version = "1.7.2",
         items = listOf(

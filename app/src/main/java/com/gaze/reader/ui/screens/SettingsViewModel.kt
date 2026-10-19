@@ -127,6 +127,7 @@ class SettingsViewModel(private val container: AppContainer) : ViewModel() {
     fun setBrightnessFollowSystem(value: Boolean) = viewModelScope.launch { container.settingsRepository.setBrightnessFollowSystem(value) }
     fun setBrightness(value: Float) = viewModelScope.launch { container.settingsRepository.setBrightness(value) }
     fun setVolumeKeyPaging(value: Boolean) = viewModelScope.launch { container.settingsRepository.setVolumeKeyPaging(value) }
+    fun setTapToPage(value: Boolean) = viewModelScope.launch { container.settingsRepository.setTapToPage(value) }
     fun setKeepScreenOn(value: Boolean) = viewModelScope.launch { container.settingsRepository.setKeepScreenOn(value) }
     fun setShowPageNumber(value: Boolean) = viewModelScope.launch { container.settingsRepository.setShowPageNumber(value) }
 
